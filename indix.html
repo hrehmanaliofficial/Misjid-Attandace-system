@@ -1,0 +1,495 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Masjid Attendance - Hafiz Rehman Ali</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+        body { font-family: 'Inter', sans-serif; }
+        .tap-highlight-none { -webkit-tap-highlight-color: transparent; }
+        .loader {
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #059669;
+            border-radius: 50%;
+            width: 24px;
+            height: 24px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        /* Green theme for Masjid context */
+        .bg-masjid { background-color: #059669; }
+        .text-masjid { color: #059669; }
+        .border-masjid { border-color: #059669; }
+    </style>
+</head>
+<body class="bg-slate-50 text-slate-900">
+    <div id="app" class="max-w-lg mx-auto min-h-screen bg-white shadow-xl border-x border-slate-200 relative">
+        <!-- Auth / Loading Overlay -->
+        <div id="loading-overlay" class="absolute inset-0 bg-white z-50 flex flex-col items-center justify-center p-6 text-center">
+            <div id="loading-spinner" class="loader mb-4"></div>
+            <p id="loading-text" class="text-slate-500 font-medium">Connecting to Masjid Database...</p>
+            <button id="retry-btn" onclick="window.location.reload()" class="hidden mt-4 px-6 py-2 bg-emerald-600 text-white rounded-xl font-bold">Retry Connection</button>
+        </div>
+
+        <!-- Main Content Area -->
+        <div id="main-content" class="hidden">
+            <!-- Navigation happens via innerHTML updates -->
+            <div id="view-container"></div>
+        </div>
+
+        <!-- Notification Toast -->
+        <div id="toast" class="fixed bottom-6 left-1/2 -translate-x-1/2 bg-slate-800 text-white px-6 py-3 rounded-full shadow-2xl transition-all opacity-0 translate-y-10 pointer-events-none z-[60]">
+            <span id="toast-message"></span>
+        </div>
+    </div>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, doc, setDoc, getDoc, onSnapshot, addDoc, deleteDoc, enableNetwork } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // --- CONFIG & INIT ---
+       const firebaseConfig = {
+  apiKey: "AIzaSyDQtbMxiCin7dgibXrtrCP7WlAE4cJBaLk",
+  authDomain: "masjid-attendance-76cd1.firebaseapp.com",
+  projectId: "masjid-attendance-76cd1",
+  storageBucket: "masjid-attendance-76cd1.firebasestorage.app",
+  messagingSenderId: "728861290937",
+  appId: "1:728861290937:web:4b99938f61f7f9d78dc668"
+};
+
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'masjid-attendance-v1';
+
+        // --- STATE ---
+        let state = {
+            user: null,
+            isLoggedIntoApp: false,
+            view: 'login',
+            students: [],
+            allAttendance: [],
+            selectedDate: new Date().toISOString().split('T')[0],
+            selectedReportMonth: new Date().toISOString().slice(0, 7),
+            currentDayAttendance: {}
+        };
+
+        // --- AUTH LOGIC ---
+        const initAuth = async (retries = 5) => {
+            const delay = (ms) => new Promise(res => setTimeout(res, ms));
+            
+            for (let i = 0; i < retries; i++) {
+                try {
+                    if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                        await signInWithCustomToken(auth, __initial_auth_token);
+                    } else {
+                        await signInAnonymously(auth);
+                    }
+                    return; // Success
+                } catch (error) {
+                    console.error(`Auth attempt ${i + 1} failed:`, error);
+                    if (i === retries - 1) {
+                        document.getElementById('loading-spinner').classList.add('hidden');
+                        document.getElementById('loading-text').innerText = "Connection Unavailable. Please check your internet.";
+                        document.getElementById('retry-btn').classList.remove('hidden');
+                    }
+                    await delay(Math.pow(2, i) * 1000);
+                }
+            }
+        };
+
+        onAuthStateChanged(auth, async (user) => {
+            state.user = user;
+            if (user) {
+                try {
+                    // Force network check
+                    await enableNetwork(db);
+                    document.getElementById('loading-overlay').classList.add('hidden');
+                    document.getElementById('main-content').classList.remove('hidden');
+                    startListeners();
+                    render();
+                } catch (e) {
+                    console.error("Network enable error:", e);
+                }
+            }
+        });
+
+        function startListeners() {
+            if (!state.user) return;
+            
+            const studentsRef = collection(db, 'artifacts', appId, 'public', 'data', 'students');
+            onSnapshot(studentsRef, (snapshot) => {
+                state.students = snapshot.docs.map(d => ({ id: d.id, ...d.data() }))
+                    .sort((a, b) => (parseInt(a.rollNo) || 0) - (parseInt(b.rollNo) || 0));
+                render();
+            }, (error) => {
+                console.error("Students listener error:", error);
+                if (error.code === 'unavailable') {
+                    showToast("Syncing offline... check internet.");
+                }
+            });
+
+            const attRef = collection(db, 'artifacts', appId, 'public', 'data', 'attendance');
+            onSnapshot(attRef, (snapshot) => {
+                state.allAttendance = snapshot.docs.map(d => ({ date: d.id, ...d.data() }));
+                render();
+            }, (error) => {
+                console.error("Attendance listener error:", error);
+            });
+        }
+
+        async function fetchDayAttendance(date) {
+            if (!state.user) return;
+            const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'attendance', date);
+            try {
+                const snap = await getDoc(docRef);
+                if (snap.exists()) {
+                    state.currentDayAttendance = snap.data().records || {};
+                } else {
+                    const defaults = {};
+                    state.students.forEach(s => defaults[s.id] = 'P');
+                    state.currentDayAttendance = defaults;
+                }
+            } catch (e) {
+                console.error("Fetch attendance error:", e);
+                showToast("Offline mode: Using cached data.");
+            }
+            render();
+        }
+
+        window.handleLogin = () => {
+            state.isLoggedIntoApp = true;
+            state.view = 'dashboard';
+            render();
+            showToast("Assalamu Alaikum, Hafiz Sahab");
+        };
+
+        window.setView = (viewName) => {
+            if (!state.isLoggedIntoApp && viewName !== 'login') return;
+            state.view = viewName;
+            if (viewName === 'mark-attendance') fetchDayAttendance(state.selectedDate);
+            render();
+        };
+
+        window.addStudent = async () => {
+            const name = document.getElementById('new-student-name').value.trim();
+            const father = document.getElementById('new-student-father').value.trim();
+            const rollNo = document.getElementById('new-student-roll').value.trim();
+
+            if (!name || !rollNo) return showToast("Name and Roll No required");
+
+            try {
+                await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'students'), {
+                    name, fatherName: father, rollNo, createdAt: new Date().toISOString()
+                });
+                showToast("Student Registered");
+                render();
+            } catch (e) { 
+                console.error(e);
+                showToast("Error: Check connection."); 
+            }
+        };
+
+        window.deleteStudent = async (id) => {
+            if (window.confirm("Remove student?")) {
+                try {
+                    await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'students', id));
+                    showToast("Deleted");
+                } catch (e) {
+                    showToast("Delete failed. Check internet.");
+                }
+            }
+        };
+
+        window.updateDate = (val) => {
+            state.selectedDate = val;
+            fetchDayAttendance(val);
+        };
+
+        window.updateReportMonth = (val) => {
+            state.selectedReportMonth = val;
+            render();
+        };
+
+        window.setStatus = (sid, status) => {
+            state.currentDayAttendance[sid] = status;
+            render();
+        };
+
+        window.markAll = (status) => {
+            state.students.forEach(s => state.currentDayAttendance[s.id] = status);
+            render();
+        };
+
+        window.saveAttendance = async () => {
+            try {
+                await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'attendance', state.selectedDate), {
+                    date: state.selectedDate,
+                    records: state.currentDayAttendance
+                });
+                showToast("Attendance Saved");
+                setView('dashboard');
+            } catch (e) { 
+                console.error(e);
+                showToast("Save failed. Offline mode active."); 
+            }
+        };
+
+        window.downloadBackup = () => {
+            const data = { students: state.students, attendance: state.allAttendance };
+            const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url; a.download = `masjid_backup_${state.selectedDate}.json`; a.click();
+        };
+
+        function showToast(msg) {
+            const toast = document.getElementById('toast');
+            document.getElementById('toast-message').innerText = msg;
+            toast.classList.replace('opacity-0', 'opacity-100');
+            toast.classList.replace('translate-y-10', 'translate-y-0');
+            setTimeout(() => {
+                toast.classList.replace('opacity-100', 'opacity-0');
+                toast.classList.replace('translate-y-0', 'translate-y-10');
+            }, 3000);
+        }
+
+        function render() {
+            const container = document.getElementById('view-container');
+            if (!container) return;
+
+            if (state.view === 'login') {
+                container.innerHTML = `
+                    <div class="h-screen flex flex-col items-center justify-center p-8 bg-emerald-700 text-white">
+                        <div class="w-24 h-24 bg-white/20 backdrop-blur-md rounded-full flex items-center justify-center mb-8 shadow-2xl">
+                            <i data-lucide="book-open" class="w-12 h-12 text-white"></i>
+                        </div>
+                        <h1 class="text-3xl font-black mb-1 text-center">Masjid Attendance</h1>
+                        <p class="text-emerald-100 opacity-90 mb-12 text-center font-medium">Hafiz Rehman Ali's Class</p>
+                        <button onclick="handleLogin()" class="w-full max-w-xs bg-white text-emerald-800 py-4 rounded-2xl font-black text-lg shadow-xl active:scale-95 transition-all">
+                            Login to Portal
+                        </button>
+                    </div>
+                `;
+            } else if (state.view === 'dashboard') {
+                container.innerHTML = `
+                    <div class="p-6">
+                        <header class="flex justify-between items-start mb-8">
+                            <div>
+                                <h1 class="text-2xl font-black text-emerald-900">Assalamu Alaikum</h1>
+                                <p class="text-slate-500 font-bold uppercase text-[10px] tracking-widest">Hafiz Rehman Ali's Class</p>
+                            </div>
+                            <button onclick="state.isLoggedIntoApp=false; setView('login')" class="p-2 text-slate-400 hover:text-red-500"><i data-lucide="power"></i></button>
+                        </header>
+
+                        <div class="grid grid-cols-2 gap-4 mb-8">
+                            <button onclick="setView('mark-attendance')" class="flex flex-col items-center justify-center p-6 bg-emerald-600 text-white rounded-3xl shadow-lg active:scale-95 transition-all">
+                                <i data-lucide="calendar-days" class="mb-2 w-8 h-8"></i>
+                                <span class="font-bold">Mark Presence</span>
+                            </button>
+                            <button onclick="setView('manage-students')" class="flex flex-col items-center justify-center p-6 bg-white text-slate-700 border border-slate-200 rounded-3xl shadow-sm active:scale-95 transition-all">
+                                <i data-lucide="users-2" class="mb-2 w-8 h-8 text-emerald-600"></i>
+                                <span class="font-bold">Students</span>
+                            </button>
+                            <button onclick="setView('reports')" class="flex flex-col items-center justify-center p-6 bg-white text-slate-700 border border-slate-200 rounded-3xl shadow-sm active:scale-95 transition-all">
+                                <i data-lucide="line-chart" class="mb-2 w-8 h-8 text-emerald-600"></i>
+                                <span class="font-bold">Reports</span>
+                            </button>
+                            <button onclick="setView('backup')" class="flex flex-col items-center justify-center p-6 bg-white text-slate-700 border border-slate-200 rounded-3xl shadow-sm active:scale-95 transition-all">
+                                <i data-lucide="cloud-download" class="mb-2 w-8 h-8 text-emerald-600"></i>
+                                <span class="font-bold">Backup</span>
+                            </button>
+                        </div>
+
+                        <div class="bg-slate-900 text-white p-6 rounded-[32px] shadow-2xl">
+                            <div class="flex justify-between items-center mb-6">
+                                <h3 class="text-xs font-black text-emerald-400 uppercase tracking-widest">Class Summary</h3>
+                                <div class="px-2 py-1 bg-emerald-500/20 text-emerald-400 text-[10px] font-black rounded-lg">LIVE CLOUD</div>
+                            </div>
+                            <div class="grid grid-cols-3 gap-2 text-center">
+                                <div class="bg-white/5 p-3 rounded-2xl">
+                                    <p class="text-2xl font-black">${state.students.length}</p>
+                                    <p class="text-[9px] uppercase font-bold text-slate-500">Students</p>
+                                </div>
+                                <div class="bg-white/5 p-3 rounded-2xl">
+                                    <p class="text-2xl font-black text-emerald-400">${state.allAttendance.length}</p>
+                                    <p class="text-[9px] uppercase font-bold text-slate-500">Days Logged</p>
+                                </div>
+                                <div class="bg-white/5 p-3 rounded-2xl">
+                                    <p class="text-2xl font-black text-amber-400">${new Date().getDate()}</p>
+                                    <p class="text-[9px] uppercase font-bold text-slate-500">Current Date</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            } else if (state.view === 'manage-students') {
+                container.innerHTML = `
+                    <div class="p-6">
+                        <div class="flex items-center gap-4 mb-6">
+                            <button onclick="setView('dashboard')" class="p-2 bg-emerald-50 text-emerald-700 rounded-full"><i data-lucide="arrow-left"></i></button>
+                            <h2 class="text-xl font-black">Register Students</h2>
+                        </div>
+
+                        <div class="bg-white p-6 rounded-3xl border-2 border-slate-100 shadow-sm space-y-4 mb-8">
+                            <div class="flex gap-2">
+                                <input id="new-student-roll" type="number" class="w-1/3 p-4 bg-slate-50 border border-slate-200 rounded-2xl outline-none focus:ring-2 focus:ring-emerald-500 font-black text-center" placeholder="Roll #">
+                                <input id="new-student-name" class="flex-1 p-4 bg-slate-50 border border-slate-200 rounded-2xl outline-none focus:ring-2 focus:ring-emerald-500" placeholder="Student Name">
+                            </div>
+                            <input id="new-student-father" class="w-full p-4 bg-slate-50 border border-slate-200 rounded-2xl outline-none focus:ring-2 focus:ring-emerald-500" placeholder="Father's Name">
+                            <button onclick="addStudent()" class="w-full bg-emerald-600 text-white p-4 rounded-2xl font-black shadow-lg shadow-emerald-100 active:scale-95 transition-all">Save Student</button>
+                        </div>
+
+                        <div class="space-y-3">
+                            <p class="text-xs font-bold text-slate-400 uppercase tracking-widest px-2">Current List (${state.students.length})</p>
+                            ${state.students.map(s => `
+                                <div class="bg-white p-4 rounded-3xl border border-slate-100 flex justify-between items-center shadow-sm">
+                                    <div class="flex items-center gap-4">
+                                        <div class="w-10 h-10 bg-emerald-50 text-emerald-700 rounded-2xl flex items-center justify-center font-black border border-emerald-100">${s.rollNo}</div>
+                                        <div>
+                                            <p class="font-bold text-slate-800">${s.name}</p>
+                                            <p class="text-[10px] text-slate-400 font-bold uppercase tracking-tight">${s.fatherName}</p>
+                                        </div>
+                                    </div>
+                                    <button onclick="deleteStudent('${s.id}')" class="p-2 text-slate-200 hover:text-red-500"><i data-lucide="trash"></i></button>
+                                </div>
+                            `).join('')}
+                        </div>
+                    </div>
+                `;
+            } else if (state.view === 'mark-attendance') {
+                container.innerHTML = `
+                    <div class="p-6 pb-32">
+                        <div class="flex items-center justify-between mb-6">
+                            <div class="flex items-center gap-3">
+                                <button onclick="setView('dashboard')" class="p-2 bg-emerald-50 text-emerald-700 rounded-full"><i data-lucide="arrow-left"></i></button>
+                                <h2 class="text-xl font-black text-emerald-900">Mark Sheet</h2>
+                            </div>
+                            <input type="date" value="${state.selectedDate}" onchange="updateDate(this.value)" class="p-2 bg-emerald-50 border-0 rounded-xl text-sm font-black text-emerald-700 outline-none">
+                        </div>
+
+                        <div class="flex gap-2 mb-6">
+                            <button onclick="markAll('P')" class="flex-1 py-3 bg-emerald-50 text-emerald-700 border border-emerald-100 rounded-xl text-[10px] font-black uppercase">All Present</button>
+                            <button onclick="markAll('A')" class="flex-1 py-3 bg-red-50 text-red-700 border border-red-100 rounded-xl text-[10px] font-black uppercase">All Absent</button>
+                        </div>
+
+                        <div class="space-y-3">
+                            ${state.students.map(s => `
+                                <div class="bg-white p-3 pr-2 rounded-[24px] border border-slate-100 shadow-sm flex justify-between items-center">
+                                    <div class="flex-1 min-w-0 flex items-center gap-3">
+                                        <div class="text-[10px] font-black text-slate-300 w-5">${s.rollNo}</div>
+                                        <div class="truncate">
+                                            <p class="font-bold text-slate-800 text-md truncate">${s.name}</p>
+                                            <p class="text-[9px] text-slate-400 font-bold uppercase truncate">${s.fatherName}</p>
+                                        </div>
+                                    </div>
+                                    <div class="flex gap-1">
+                                        ${['P', 'A', 'L'].map(st => `
+                                            <button onclick="setStatus('${s.id}', '${st}')" class="w-10 h-10 rounded-xl font-black text-xs transition-all ${
+                                                state.currentDayAttendance[s.id] === st
+                                                    ? st === 'P' ? 'bg-emerald-500 text-white shadow-lg scale-110' :
+                                                      st === 'A' ? 'bg-red-500 text-white shadow-lg scale-110' :
+                                                      'bg-amber-500 text-white shadow-lg scale-110'
+                                                    : 'bg-slate-50 text-slate-400'
+                                            }">${st}</button>
+                                        `).join('')}
+                                    </div>
+                                </div>
+                            `).join('')}
+                        </div>
+
+                        <div class="fixed bottom-0 left-0 right-0 max-w-lg mx-auto p-4 bg-white/90 backdrop-blur-md border-t border-slate-100">
+                            <button onclick="saveAttendance()" class="w-full bg-emerald-600 text-white py-4 rounded-3xl font-black text-lg shadow-xl shadow-emerald-100">SAVE ATTENDANCE</button>
+                        </div>
+                    </div>
+                `;
+            } else if (state.view === 'reports') {
+                const statsMap = {};
+                state.students.forEach(s => statsMap[s.id] = { roll: s.rollNo, name: s.name, P:0, A:0, L:0, total:0 });
+                const filteredAtt = state.allAttendance.filter(day => day.date.startsWith(state.selectedReportMonth));
+                filteredAtt.forEach(day => {
+                    Object.entries(day.records || {}).forEach(([sid, status]) => {
+                        if (statsMap[sid]) { statsMap[sid][status]++; statsMap[sid].total++; }
+                    });
+                });
+                const reportData = Object.values(statsMap);
+
+                container.innerHTML = `
+                    <div class="p-6">
+                        <div class="flex items-center justify-between mb-6">
+                            <div class="flex items-center gap-4">
+                                <button onclick="setView('dashboard')" class="p-2 bg-emerald-50 text-emerald-700 rounded-full"><i data-lucide="arrow-left"></i></button>
+                                <h2 class="text-xl font-black">Monthly Report</h2>
+                            </div>
+                            <input type="month" value="${state.selectedReportMonth}" onchange="updateReportMonth(this.value)" class="p-2 bg-emerald-50 border-0 rounded-xl text-xs font-black text-emerald-700 outline-none">
+                        </div>
+
+                        <div class="bg-emerald-600 text-white p-4 rounded-3xl mb-6 shadow-lg flex justify-between items-center">
+                            <p class="text-xs font-black uppercase tracking-tighter opacity-80">Class Report:</p>
+                            <p class="font-bold">${new Date(state.selectedReportMonth + '-01').toLocaleString('default', { month: 'long', year: 'numeric' })}</p>
+                        </div>
+
+                        <div class="bg-white rounded-[32px] border border-slate-100 shadow-xl overflow-hidden">
+                            <table class="w-full text-xs">
+                                <thead class="bg-slate-50 border-b border-slate-100">
+                                    <tr>
+                                        <th class="px-4 py-4 text-left font-black uppercase text-slate-400">Roll</th>
+                                        <th class="px-2 py-4 text-left font-black uppercase text-slate-400">Student</th>
+                                        <th class="py-4 text-center font-black uppercase text-emerald-600">P</th>
+                                        <th class="py-4 text-center font-black uppercase text-red-600">A</th>
+                                        <th class="px-4 py-4 text-right font-black uppercase text-slate-400">%</th>
+                                    </tr>
+                                </thead>
+                                <tbody class="divide-y divide-slate-50">
+                                    ${reportData.map(row => {
+                                        const perc = row.total > 0 ? ((row.P / row.total) * 100).toFixed(0) : 0;
+                                        return `
+                                            <tr>
+                                                <td class="px-4 py-4 font-black text-emerald-700">${row.roll}</td>
+                                                <td class="px-2 py-4 font-bold text-slate-700">${row.name}</td>
+                                                <td class="py-4 text-center font-black text-emerald-600">${row.P}</td>
+                                                <td class="py-4 text-center font-black text-red-600">${row.A}</td>
+                                                <td class="px-4 py-4 text-right">
+                                                    <span class="px-2 py-1 rounded-lg font-black ${perc >= 75 ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'}">${perc}%</span>
+                                                </td>
+                                            </tr>
+                                        `;
+                                    }).join('')}
+                                </tbody>
+                            </table>
+                            ${reportData.length === 0 ? '<p class="text-center py-20 text-slate-400">Empty</p>' : ''}
+                        </div>
+                    </div>
+                `;
+            } else if (state.view === 'backup') {
+                container.innerHTML = `
+                    <div class="p-6">
+                        <div class="flex items-center gap-4 mb-10">
+                            <button onclick="setView('dashboard')" class="p-2 bg-emerald-50 text-emerald-700 rounded-full"><i data-lucide="arrow-left"></i></button>
+                            <h2 class="text-xl font-black">Archive Management</h2>
+                        </div>
+                        <div class="bg-white p-10 rounded-[48px] border-2 border-emerald-50 shadow-2xl text-center space-y-6">
+                            <div class="w-24 h-24 bg-emerald-600 text-white rounded-[36px] flex items-center justify-center mx-auto shadow-emerald-200 shadow-2xl rotate-6">
+                                <i data-lucide="shield-check" class="w-12 h-12"></i>
+                            </div>
+                            <div>
+                                <h3 class="text-2xl font-black text-slate-900 mb-2">Cloud Backup</h3>
+                                <p class="text-sm text-slate-500 font-medium leading-relaxed">Download a complete copy of Hafiz Rehman Ali's class data to your phone or laptop.</p>
+                            </div>
+                            <button onclick="downloadBackup()" class="w-full bg-emerald-600 text-white py-5 rounded-3xl font-black shadow-lg shadow-emerald-100 active:scale-95 transition-all">EXPORT DATABASE</button>
+                        </div>
+                    </div>
+                `;
+            }
+            lucide.createIcons();
+        }
+
+        window.onload = () => { initAuth(); render(); };
+    </script>
+</body>
+</html>
