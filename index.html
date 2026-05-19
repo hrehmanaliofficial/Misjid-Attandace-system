@@ -7,8 +7,8 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- Lucide Icons -->
     <script src="https://unpkg.com/lucide@latest"></script>
-    <!-- SheetJS for Excel Export -->
-    <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
+    <!-- ExcelJS for Styled Professional Excel Export -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.3.0/exceljs.min.js"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
         body { 
@@ -34,6 +34,7 @@
 <body class="bg-slate-100 text-slate-900">
     <div id="app" class="max-w-lg mx-auto min-h-screen bg-white shadow-2xl border-x border-slate-200 relative flex flex-col">
         
+        <!-- Connectivity Status Bar -->
         <div id="status-bar" class="bg-slate-900 text-[10px] text-white px-4 py-1 flex justify-between items-center z-50">
             <span class="font-bold opacity-70 uppercase tracking-widest">Hafiz Rehman Ali's Class</span>
             <div id="network-status" class="flex items-center gap-1.5">
@@ -42,16 +43,54 @@
             </div>
         </div>
 
+        <!-- Auth / Loading Overlay -->
         <div id="loading-overlay" class="absolute inset-0 bg-white z-[100] flex flex-col items-center justify-center p-6 text-center">
             <div id="loading-spinner" class="loader mb-4"></div>
             <p id="loading-text" class="text-slate-500 font-medium tracking-tight text-sm">Connecting to Cloud Database...</p>
             <button id="retry-btn" onclick="window.location.reload()" class="hidden mt-4 px-6 py-2 bg-emerald-600 text-white rounded-xl font-bold shadow-lg shadow-emerald-100">Retry Connection</button>
         </div>
 
-        <div id="main-content" class="hidden flex-1 overflow-y-auto">
+        <!-- Main Content Area -->
+        <div id="main-content" class="hidden flex-1 overflow-y-auto pb-6">
             <div id="view-container"></div>
         </div>
 
+        <!-- In-App Calling Desk Confirmation Modal -->
+        <div id="call-modal" class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[250] flex items-center justify-center p-6 hidden opacity-0 transition-opacity duration-300">
+            <div class="bg-white rounded-[32px] w-full max-w-sm p-6 shadow-2xl border border-slate-100 transform scale-95 transition-transform duration-300">
+                <div class="w-16 h-16 bg-emerald-50 text-emerald-600 rounded-[20px] flex items-center justify-center mx-auto mb-4">
+                    <i data-lucide="phone-call" class="w-8 h-8"></i>
+                </div>
+                <h3 class="text-xl font-black text-slate-900 text-center mb-1 leading-tight">Calling Desk</h3>
+                <p class="text-xs text-slate-400 font-bold text-center uppercase tracking-widest mb-6">Class Communication Link</p>
+                
+                <div class="bg-slate-50 rounded-2xl p-4 mb-6 space-y-2.5">
+                    <div class="flex justify-between text-xs items-start">
+                        <span class="text-slate-400 font-bold">Student Name:</span>
+                        <span id="call-student-name" class="font-black text-slate-800 text-right leading-none"></span>
+                    </div>
+                    <div class="flex justify-between text-xs items-start">
+                        <span class="text-slate-400 font-bold">Father's Name:</span>
+                        <span id="call-father-name" class="font-bold text-slate-600 text-right leading-none"></span>
+                    </div>
+                    <div class="flex justify-between text-xs items-start">
+                        <span class="text-slate-400 font-bold">Contact Target:</span>
+                        <span id="call-relation" class="font-black text-emerald-700 uppercase tracking-wide bg-emerald-50 px-2 py-0.5 rounded border border-emerald-100 text-[10px] leading-none"></span>
+                    </div>
+                    <div class="flex justify-between text-xs items-center pt-2.5 border-t border-slate-200">
+                        <span class="text-slate-400 font-bold">Phone Link:</span>
+                        <span id="call-number" class="font-mono font-black text-sm text-slate-900"></span>
+                    </div>
+                </div>
+
+                <div class="flex gap-2">
+                    <button onclick="closeCallModal()" class="flex-1 py-3.5 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-2xl font-black text-xs transition-all active:scale-95">Cancel</button>
+                    <a id="call-link-btn" href="#" class="flex-[2] py-3.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-2xl font-black text-xs text-center shadow-lg shadow-emerald-100 transition-all active:scale-95 block">Place Call</a>
+                </div>
+            </div>
+        </div>
+
+        <!-- Notification Toast -->
         <div id="toast" class="fixed bottom-6 left-1/2 -translate-x-1/2 bg-slate-900 text-white px-6 py-3 rounded-2xl shadow-2xl transition-all duration-300 opacity-0 translate-y-10 pointer-events-none z-[200] flex items-center gap-3 border border-white/10">
             <i id="toast-icon" data-lucide="info" class="w-4 h-4 text-emerald-400"></i>
             <span id="toast-message" class="text-sm font-bold tracking-tight"></span>
@@ -63,6 +102,7 @@
         import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, collection, doc, setDoc, getDoc, onSnapshot, addDoc, deleteDoc, updateDoc, enableNetwork } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
+        // --- OFFICIAL FIREBASE CONFIG ---
         const firebaseConfig = {
             apiKey: "AIzaSyDQtbMxiCin7dgibXrtrCP7WlAE4cJBaLk",
             authDomain: "masjid-attendance-76cd1.firebaseapp.com",
@@ -77,6 +117,15 @@
         const db = getFirestore(app);
         const appId = 'masjid-attendance-76cd1-v1';
 
+        // Helper to get current week's Monday
+        function getMonday(d) {
+            d = new Date(d);
+            const day = d.getDay();
+            const diff = d.getDate() - day + (day === 0 ? -6 : 1);
+            return new Date(d.setDate(diff));
+        }
+
+        // --- STATE ---
         let state = {
             user: null,
             isLoggedIntoApp: false,
@@ -85,11 +134,13 @@
             allAttendance: [],
             selectedDate: new Date().toISOString().split('T')[0],
             selectedReportMonth: new Date().toISOString().slice(0, 7),
+            selectedWeekStart: getMonday(new Date()).toISOString().split('T')[0],
             currentDayAttendance: {},
             searchQuery: '',
             editingStudent: null
         };
 
+        // --- AUTH & NETWORK LOGIC ---
         const initAuth = async (retries = 5) => {
             const delay = (ms) => new Promise(res => setTimeout(res, ms));
             for (let i = 0; i < retries; i++) {
@@ -223,6 +274,11 @@
         window.startEditing = (studentId) => {
             state.editingStudent = state.students.find(s => s.id === studentId);
             render();
+            // SMOOTH AUTO-SCROLL TO FORM HEAD AT THE TOP
+            const mainContent = document.getElementById('main-content');
+            if (mainContent) {
+                mainContent.scrollTo({ top: 0, behavior: 'smooth' });
+            }
         };
 
         window.saveEdit = async () => {
@@ -270,6 +326,18 @@
             render();
         };
 
+        window.updateWeeklyStart = (val) => {
+            state.selectedWeekStart = getMonday(new Date(val)).toISOString().split('T')[0];
+            render();
+        };
+
+        window.changeWeek = (offset) => {
+            let current = new Date(state.selectedWeekStart);
+            current.setDate(current.getDate() + (offset * 7));
+            state.selectedWeekStart = current.toISOString().split('T')[0];
+            render();
+        };
+
         window.setStatus = (sid, status) => {
             state.currentDayAttendance[sid] = status;
             render();
@@ -291,53 +359,310 @@
             } catch (e) { showToast("Saved Offline"); }
         };
 
-        window.downloadExcelReport = () => {
-            const [year, month] = state.selectedReportMonth.split('-').map(Number);
-            const daysInMonth = new Date(year, month, 0).getDate();
-            const monthName = new Date(year, month - 1, 1).toLocaleString('default', { month: 'long', year: 'numeric' });
+        window.confirmAndCall = (studentName, fatherName, relation, number) => {
+            document.getElementById('call-student-name').innerText = studentName;
+            document.getElementById('call-father-name').innerText = fatherName || '-';
+            document.getElementById('call-relation').innerText = relation || 'Relation';
+            document.getElementById('call-number').innerText = number;
+            document.getElementById('call-link-btn').setAttribute('href', `tel:${number}`);
 
-            const registerHeader = ["Roll No", "Student Name", "Father Name", ...Array.from({length: daysInMonth}, (_, i) => i + 1), "P", "A", "L", "%"];
-            const registerRows = state.students.map(s => {
-                let p = 0, a = 0, l = 0;
-                const dailyAtt = [];
-                for(let d=1; d<=daysInMonth; d++){
-                    const dateStr = `${state.selectedReportMonth}-${String(d).padStart(2, '0')}`;
-                    const dayRecord = state.allAttendance.find(rec => rec.date === dateStr);
-                    const status = dayRecord?.records?.[s.id] || "-";
-                    dailyAtt.push(status);
-                    if(status === 'P') p++; else if(status === 'A') a++; else if(status === 'L') l++;
+            const modal = document.getElementById('call-modal');
+            modal.classList.remove('hidden');
+            setTimeout(() => {
+                modal.classList.remove('opacity-0');
+                modal.querySelector('div').classList.remove('scale-95');
+            }, 50);
+        };
+
+        window.closeCallModal = () => {
+            const modal = document.getElementById('call-modal');
+            modal.classList.add('opacity-0');
+            modal.querySelector('div').classList.add('scale-95');
+            setTimeout(() => {
+                modal.classList.add('hidden');
+            }, 300);
+        };
+
+        // --- STYLED EXCELJS EXPORT SYSTEM WITH HIGH-CONTRAST AND THICK BORDERS ---
+        window.downloadExcelReport = async () => {
+            try {
+                const [year, month] = state.selectedReportMonth.split('-').map(Number);
+                const daysInMonth = new Date(year, month, 0).getDate();
+                const monthName = new Date(year, month - 1, 1).toLocaleString('default', { month: 'long', year: 'numeric' });
+
+                // Initialize ExcelJS Workbook
+                const workbook = new ExcelJS.Workbook();
+                
+                // Add Sheets
+                const wsRegister = workbook.addWorksheet("Monthly Register", { views: [{ showGridLines: true }] });
+                const wsDirectory = workbook.addWorksheet("Contact Directory", { views: [{ showGridLines: true }] });
+
+                // --- STYLE DEF TOKENS ---
+                const borderThin = { style: 'thin', color: { argb: 'FFCBD5E1' } };
+                const borderThickDivider = { style: 'medium', color: { argb: 'FF1E293B' } }; // Deep divider
+                const borderDoubleRight = { style: 'medium', color: { argb: 'FF000000' } }; // Black divider
+
+                const standardBorder = {
+                    top: borderThin, left: borderThin, bottom: borderThin, right: borderThin
+                };
+                
+                const dividerBorder = {
+                    top: borderThin, left: borderThin, bottom: borderThin, right: borderThickDivider
+                };
+
+                const doubleDividerBorder = {
+                    top: borderThin, left: borderThin, bottom: borderThin, right: borderDoubleRight
+                };
+
+                // --- TAB 1: MONTHLY REGISTER ---
+                const colPctIdx = 7 + daysInMonth;
+
+                // Merge Header Title Row 1
+                wsRegister.mergeCells(1, 1, 1, colPctIdx);
+                const titleCell = wsRegister.getCell('A1');
+                titleCell.value = `MASJID ATTENDANCE REGISTER - ${monthName.toUpperCase()}`;
+                titleCell.font = { name: 'Inter', bold: true, size: 14, color: { argb: 'FFFFFFFF' } };
+                titleCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF047857' } }; // Emerald Green
+                titleCell.alignment = { horizontal: 'center', vertical: 'middle' };
+                wsRegister.getRow(1).height = 40;
+
+                // Merge Subtitle Row 2
+                wsRegister.mergeCells(2, 1, 2, colPctIdx);
+                const subCell = wsRegister.getCell('A2');
+                subCell.value = "Class Teacher: Hafiz Rehman Ali";
+                subCell.font = { name: 'Inter', bold: true, size: 10, color: { argb: 'FFD1FAE5' } };
+                subCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF065F46' } }; // Darker Emerald
+                subCell.alignment = { horizontal: 'center', vertical: 'middle' };
+                wsRegister.getRow(2).height = 24;
+
+                // Spacing Row 3
+                wsRegister.getRow(3).height = 15;
+
+                // Table Headers Row 4
+                const headerRow = wsRegister.getRow(4);
+                headerRow.height = 28;
+
+                headerRow.getCell(1).value = "Roll No";
+                headerRow.getCell(1).border = dividerBorder;
+                
+                headerRow.getCell(2).value = "Student Name";
+                headerRow.getCell(2).border = dividerBorder;
+                
+                headerRow.getCell(3).value = "Father Name";
+                headerRow.getCell(3).border = doubleDividerBorder; // Deep vertical separating block
+
+                // Daily headers (1 to daysInMonth)
+                for (let d = 1; d <= daysInMonth; d++) {
+                    const colIdx = 3 + d;
+                    const cell = headerRow.getCell(colIdx);
+                    cell.value = d;
+                    cell.border = (d === daysInMonth) ? doubleDividerBorder : standardBorder;
+                    cell.alignment = { horizontal: 'center', vertical: 'middle' };
                 }
-                const total = p + a + l;
-                const perc = total > 0 ? ((p / total) * 100).toFixed(0) : 0;
-                return [s.rollNo, s.name, s.fatherName || "-", ...dailyAtt, p, a, l, `${perc}%`];
-            });
 
-            const directoryHeader = ["Roll No", "Student Name", "Father Name", "Whose Number?", "Contact Number"];
-            const directoryRows = state.students.map(s => [s.rollNo, s.name, s.fatherName || "-", s.contactRelation || "Father", s.contactNo || "-"]);
+                // Summary Headers (P, A, L, %)
+                const colPIdx = 4 + daysInMonth;
+                const colAIdx = 5 + daysInMonth;
+                const colLIdx = 6 + daysInMonth;
+                const colPct = colPctIdx;
 
-            const wb = XLSX.utils.book_new();
-            const wsRegister = XLSX.utils.aoa_to_sheet([
-                [`MASJID ATTENDANCE REGISTER - ${monthName}`],
-                [`Hafiz Rehman Ali's Class`],
-                [],
-                registerHeader,
-                ...registerRows
-            ]);
-            wsRegister['!cols'] = [{ wch: 8 }, { wch: 22 }, { wch: 22 }, ...Array(daysInMonth).fill({ wch: 3.5 }), { wch: 5 }, { wch: 5 }, { wch: 5 }, { wch: 8 }];
-            XLSX.utils.book_append_sheet(wb, wsRegister, "Monthly Register");
+                headerRow.getCell(colPIdx).value = "P";
+                headerRow.getCell(colPIdx).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD1FAE5' } }; // Green fill
+                headerRow.getCell(colPIdx).border = standardBorder;
+                headerRow.getCell(colPIdx).alignment = { horizontal: 'center' };
 
-            const wsDirectory = XLSX.utils.aoa_to_sheet([
-                ["STUDENT CONTACT DIRECTORY"],
-                [`Updated: ${new Date().toLocaleDateString()}`],
-                [],
-                directoryHeader,
-                ...directoryRows
-            ]);
-            wsDirectory['!cols'] = [{ wch: 10 }, { wch: 25 }, { wch: 25 }, { wch: 15 }, { wch: 20 }];
-            XLSX.utils.book_append_sheet(wb, wsDirectory, "Contact Directory");
+                headerRow.getCell(colAIdx).value = "A";
+                headerRow.getCell(colAIdx).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFEE2E2' } }; // Red fill
+                headerRow.getCell(colAIdx).border = standardBorder;
+                headerRow.getCell(colAIdx).alignment = { horizontal: 'center' };
 
-            XLSX.writeFile(wb, `Hafiz_Rehman_Register_${state.selectedReportMonth}.xlsx`);
-            showToast("Register Generated", "file-spreadsheet");
+                headerRow.getCell(colLIdx).value = "L";
+                headerRow.getCell(colLIdx).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFEF3C7' } }; // Amber fill
+                headerRow.getCell(colLIdx).border = standardBorder;
+                headerRow.getCell(colLIdx).alignment = { horizontal: 'center' };
+
+                headerRow.getCell(colPct).value = "Percentage (%)";
+                headerRow.getCell(colPct).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF1F5F9' } }; // Slate fill
+                headerRow.getCell(colPct).border = standardBorder;
+                headerRow.getCell(colPct).alignment = { horizontal: 'center' };
+
+                headerRow.font = { name: 'Inter', bold: true, size: 10, color: { argb: 'FF1E293B' } };
+
+                // Build Student rows starting Row 5
+                state.students.forEach((s, sIdx) => {
+                    const rNum = 5 + sIdx;
+                    const row = wsRegister.getRow(rNum);
+                    row.height = 24;
+
+                    row.getCell(1).value = parseInt(s.rollNo) || (sIdx + 1);
+                    row.getCell(1).font = { name: 'Inter', bold: true, size: 10 };
+                    row.getCell(1).alignment = { horizontal: 'center', vertical: 'middle' };
+                    row.getCell(1).border = dividerBorder;
+
+                    row.getCell(2).value = s.name;
+                    row.getCell(2).font = { name: 'Inter', bold: true, size: 10, color: { argb: 'FF0F172A' } };
+                    row.getCell(2).alignment = { horizontal: 'left', vertical: 'middle' };
+                    row.getCell(2).border = dividerBorder;
+
+                    row.getCell(3).value = s.fatherName || '-';
+                    row.getCell(3).font = { name: 'Inter', size: 9, color: { argb: 'FF475569' } };
+                    row.getCell(3).alignment = { horizontal: 'left', vertical: 'middle' };
+                    row.getCell(3).border = doubleDividerBorder; // Deep vertical line separating student info from days
+
+                    let pTot = 0, aTot = 0, lTot = 0;
+                    for (let d = 1; d <= daysInMonth; d++) {
+                        const dateStr = `${state.selectedReportMonth}-${String(d).padStart(2, '0')}`;
+                        const dayRecord = state.allAttendance.find(rec => rec.date === dateStr);
+                        const status = dayRecord?.records?.[s.id] || "-";
+
+                        const cell = row.getCell(3 + d);
+                        cell.value = status;
+                        cell.alignment = { horizontal: 'center', vertical: 'middle' };
+                        
+                        // Set Border Block separation
+                        cell.border = (d === daysInMonth) ? doubleDividerBorder : standardBorder;
+
+                        // High contrast coloration
+                        if (status === 'P') {
+                            pTot++;
+                            cell.font = { name: 'Inter', bold: true, size: 9, color: { argb: 'FF15803D' } };
+                            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFDCFCE7' } };
+                        } else if (status === 'A') {
+                            aTot++;
+                            // CRITICAL HIGH CONTRAST BRIGHT RED background for Absents (A)
+                            cell.font = { name: 'Inter', bold: true, size: 10, color: { argb: 'FFB91C1C' } };
+                            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFCA5A5' } }; // Light red fill
+                        } else if (status === 'L') {
+                            lTot++;
+                            cell.font = { name: 'Inter', bold: true, size: 9, color: { argb: 'FFD97706' } };
+                            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFEF3C7' } };
+                        } else {
+                            cell.font = { name: 'Inter', size: 9, color: { argb: 'FF94A3B8' } };
+                        }
+                    }
+
+                    // Totals & Percentage Calculations
+                    row.getCell(colPIdx).value = pTot;
+                    row.getCell(colPIdx).font = { name: 'Inter', bold: true, size: 10, color: { argb: 'FF15803D' } };
+                    row.getCell(colPIdx).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFDCFCE7' } };
+                    row.getCell(colPIdx).border = standardBorder;
+                    row.getCell(colPIdx).alignment = { horizontal: 'center', vertical: 'middle' };
+
+                    row.getCell(colAIdx).value = aTot;
+                    row.getCell(colAIdx).font = { name: 'Inter', bold: true, size: 10, color: { argb: 'FFB91C1C' } };
+                    row.getCell(colAIdx).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFEE2E2' } };
+                    row.getCell(colAIdx).border = standardBorder;
+                    row.getCell(colAIdx).alignment = { horizontal: 'center', vertical: 'middle' };
+
+                    row.getCell(colLIdx).value = lTot;
+                    row.getCell(colLIdx).font = { name: 'Inter', bold: true, size: 10, color: { argb: 'FFD97706' } };
+                    row.getCell(colLIdx).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFEF3C7' } };
+                    row.getCell(colLIdx).border = standardBorder;
+                    row.getCell(colLIdx).alignment = { horizontal: 'center', vertical: 'middle' };
+
+                    const totalLogged = pTot + aTot + lTot;
+                    const pctVal = totalLogged > 0 ? Math.round((pTot / totalLogged) * 100) : 0;
+                    row.getCell(colPct).value = `${pctVal}%`;
+                    row.getCell(colPct).font = { name: 'Inter', bold: true, size: 10, color: { argb: 'FF1E293B' } };
+                    row.getCell(colPct).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF1F5F9' } };
+                    row.getCell(colPct).border = standardBorder;
+                    row.getCell(colPct).alignment = { horizontal: 'center', vertical: 'middle' };
+                });
+
+                // Configure Column Widths for Register
+                wsRegister.getColumn(1).width = 9;   // Roll No
+                wsRegister.getColumn(2).width = 24;  // Name
+                wsRegister.getColumn(3).width = 24;  // Father Name
+                for (let d = 1; d <= daysInMonth; d++) {
+                    wsRegister.getColumn(3 + d).width = 5; // Date columns
+                }
+                wsRegister.getColumn(colPIdx).width = 6;
+                wsRegister.getColumn(colAIdx).width = 6;
+                wsRegister.getColumn(colLIdx).width = 6;
+                wsRegister.getColumn(colPct).width = 16; // Percentage Column
+
+                // --- TAB 2: CONTACT DIRECTORY ---
+                wsDirectory.mergeCells(1, 1, 1, 5);
+                const dTitle = wsDirectory.getCell('A1');
+                dTitle.value = "STUDENT CONTACT DIRECTORY";
+                dTitle.font = { name: 'Inter', bold: true, size: 14, color: { argb: 'FFFFFFFF' } };
+                dTitle.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1E293B' } }; // Cool Dark Slate
+                dTitle.alignment = { horizontal: 'center', vertical: 'middle' };
+                wsDirectory.getRow(1).height = 40;
+
+                wsDirectory.mergeCells(2, 1, 2, 5);
+                const dSub = wsDirectory.getCell('A2');
+                dSub.value = "Hafiz Rehman Ali's Class Communication Link";
+                dSub.font = { name: 'Inter', bold: true, size: 10, color: { argb: 'FFF1F5F9' } };
+                dSub.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF334155' } };
+                dSub.alignment = { horizontal: 'center', vertical: 'middle' };
+                wsDirectory.getRow(2).height = 24;
+
+                wsDirectory.getRow(3).height = 15;
+
+                const dHeaderRow = wsDirectory.getRow(4);
+                dHeaderRow.height = 26;
+                const dHeaders = ["Roll No", "Student Name", "Father Name", "Whose Number?", "Contact Number"];
+                dHeaders.forEach((h, idx) => {
+                    const cell = dHeaderRow.getCell(idx + 1);
+                    cell.value = h;
+                    cell.font = { name: 'Inter', bold: true, size: 10, color: { argb: 'FF0F172A' } };
+                    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE2E8F0' } };
+                    cell.border = standardBorder;
+                    cell.alignment = { horizontal: idx === 0 || idx === 3 ? 'center' : 'left', vertical: 'middle' };
+                });
+
+                state.students.forEach((s, sIdx) => {
+                    const rNum = 5 + sIdx;
+                    const row = wsDirectory.getRow(rNum);
+                    row.height = 24;
+
+                    row.getCell(1).value = parseInt(s.rollNo) || (sIdx + 1);
+                    row.getCell(1).font = { name: 'Inter', bold: true, size: 10 };
+                    row.getCell(1).alignment = { horizontal: 'center', vertical: 'middle' };
+
+                    row.getCell(2).value = s.name;
+                    row.getCell(2).font = { name: 'Inter', bold: true, size: 10 };
+                    row.getCell(2).alignment = { horizontal: 'left', vertical: 'middle' };
+
+                    row.getCell(3).value = s.fatherName || '-';
+                    row.getCell(3).font = { name: 'Inter', size: 9, color: { argb: 'FF475569' } };
+                    row.getCell(3).alignment = { horizontal: 'left', vertical: 'middle' };
+
+                    row.getCell(4).value = s.contactRelation || 'Father';
+                    row.getCell(4).font = { name: 'Inter', bold: true, size: 10, color: { argb: 'FF0F766E' } };
+                    row.getCell(4).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF0FDF4' } }; // Soft Teal highlight
+                    row.getCell(4).alignment = { horizontal: 'center', vertical: 'middle' };
+
+                    row.getCell(5).value = s.contactNo || '-';
+                    row.getCell(5).font = { name: 'Inter', bold: true, size: 10, color: { argb: 'FF1E293B' } };
+                    row.getCell(5).alignment = { horizontal: 'left', vertical: 'middle' };
+
+                    for (let col = 1; col <= 5; col++) {
+                        row.getCell(col).border = standardBorder;
+                    }
+                });
+
+                // Configure Column Widths for Directory
+                wsDirectory.getColumn(1).width = 12;
+                wsDirectory.getColumn(2).width = 25;
+                wsDirectory.getColumn(3).width = 25;
+                wsDirectory.getColumn(4).width = 18;
+                wsDirectory.getColumn(5).width = 22;
+
+                // Write and Trigger native OpenXML XLSX Download
+                const buffer = await workbook.xlsx.writeBuffer();
+                const blob = new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement("a");
+                a.href = url;
+                a.download = `Hafiz_Rehman_Register_${state.selectedReportMonth}.xlsx`;
+                a.click();
+                showToast("Register Exported Successfully!", "file-spreadsheet");
+            } catch (error) {
+                console.error("Export failure:", error);
+                showToast("Excel Export Failed", "alert-circle");
+            }
         };
 
         window.downloadBackup = () => {
@@ -375,6 +700,7 @@
                         </div>
                         <h1 class="text-3xl font-black mb-1 text-center tracking-tight leading-none">Madrasa Portal</h1>
                         <p class="text-emerald-100 opacity-90 mb-12 text-center font-medium">Hafiz Rehman Ali's Class</p>
+                        
                         <form onsubmit="handleLogin(event)" class="w-full max-w-xs space-y-4">
                             <input id="login-user" type="text" placeholder="Username" class="w-full p-4 bg-white/10 border border-white/20 rounded-2xl outline-none focus:bg-white/20 transition-all font-bold placeholder:text-white/30">
                             <input id="login-pass" type="password" placeholder="Password" class="w-full p-4 bg-white/10 border border-white/20 rounded-2xl outline-none focus:bg-white/20 transition-all font-bold placeholder:text-white/30">
@@ -394,7 +720,7 @@
                         </header>
 
                         <div class="grid grid-cols-2 gap-4 mb-8">
-                            <button onclick="setView('mark-attendance')" class="flex flex-col items-center justify-center p-5 bg-emerald-600 text-white rounded-[28px] shadow-lg active:scale-95 transition-all">
+                            <button onclick="setView('mark-attendance')" class="flex flex-col items-center justify-center p-5 bg-emerald-600 text-white rounded-[28px] shadow-lg shadow-emerald-100 active:scale-95 transition-all">
                                 <i data-lucide="calendar-check" class="mb-2 w-7 h-7"></i>
                                 <span class="font-bold text-sm">Attendance</span>
                             </button>
@@ -402,25 +728,34 @@
                                 <i data-lucide="users-2" class="mb-2 w-7 h-7 text-emerald-600"></i>
                                 <span class="font-bold text-sm">Enrollment</span>
                             </button>
+                            <button onclick="setView('weekly-register')" class="flex flex-col items-center justify-center p-5 bg-white text-slate-700 border border-slate-200 rounded-[28px] shadow-sm active:scale-95 transition-all">
+                                <i data-lucide="calendar-range" class="mb-2 w-7 h-7 text-emerald-600"></i>
+                                <span class="font-bold text-sm">Weekly View</span>
+                            </button>
                             <button onclick="setView('reports')" class="flex flex-col items-center justify-center p-5 bg-white text-slate-700 border border-slate-200 rounded-[28px] shadow-sm active:scale-95 transition-all">
                                 <i data-lucide="file-spreadsheet" class="mb-2 w-7 h-7 text-emerald-600"></i>
                                 <span class="font-bold text-sm">Reports</span>
                             </button>
-                            <button onclick="setView('contact-log')" class="flex flex-col items-center justify-center p-5 bg-emerald-50 text-emerald-800 border border-emerald-100 rounded-[28px] shadow-sm active:scale-95 transition-all">
+                            <button onclick="setView('contact-log')" class="flex flex-col items-center justify-center p-5 bg-white text-slate-700 border border-slate-200 rounded-[28px] shadow-sm active:scale-95 transition-all">
                                 <i data-lucide="phone" class="mb-2 w-7 h-7 text-emerald-600"></i>
                                 <span class="font-bold text-sm">Contact Log</span>
+                            </button>
+                            <button onclick="setView('backup')" class="flex flex-col items-center justify-center p-5 bg-white text-slate-700 border border-slate-200 rounded-[28px] shadow-sm active:scale-95 transition-all">
+                                <i data-lucide="database" class="mb-2 w-7 h-7 text-emerald-600"></i>
+                                <span class="font-bold text-sm">Backup</span>
                             </button>
                         </div>
 
                         <div class="bg-slate-900 text-white p-6 rounded-[36px] shadow-2xl relative overflow-hidden">
+                            <div class="absolute -right-4 -top-4 w-24 h-24 bg-emerald-500/10 rounded-full blur-3xl"></div>
                             <div class="flex justify-between items-center mb-6">
-                                <h3 class="text-xs font-black text-emerald-400 uppercase tracking-widest">Stats</h3>
-                                <div class="px-2.5 py-1 bg-emerald-500/10 text-emerald-400 text-[10px] font-black rounded-full border border-emerald-500/20 uppercase tracking-tighter">Live Database</div>
+                                <h3 class="text-xs font-black text-emerald-400 uppercase tracking-widest">Database Stats</h3>
+                                <div class="px-2.5 py-1 bg-emerald-500/10 text-emerald-400 text-[10px] font-black rounded-full border border-emerald-500/20">LIVE SYNC</div>
                             </div>
                             <div class="grid grid-cols-3 gap-2 text-center">
-                                <div><p class="text-2xl font-black">${state.students.length}</p><p class="text-[9px] uppercase font-bold text-slate-500">Students</p></div>
-                                <div><p class="text-2xl font-black text-emerald-400">${state.allAttendance.length}</p><p class="text-[9px] uppercase font-bold text-slate-500">History</p></div>
-                                <div><p class="text-2xl font-black text-amber-400">${new Date().getDate()}</p><p class="text-[9px] uppercase font-bold text-slate-500">Today</p></div>
+                                <div><p class="text-2xl font-black leading-none">${state.students.length}</p><p class="text-[9px] mt-2 uppercase font-bold text-slate-500 tracking-tighter">Students</p></div>
+                                <div><p class="text-2xl font-black text-emerald-400 leading-none">${state.allAttendance.length}</p><p class="text-[9px] mt-2 uppercase font-bold text-slate-500 tracking-tighter">History</p></div>
+                                <div><p class="text-2xl font-black text-amber-400 leading-none">${new Date().getDate()}</p><p class="text-[9px] mt-2 uppercase font-bold text-slate-500 tracking-tighter">Day</p></div>
                             </div>
                         </div>
                     </div>
@@ -428,7 +763,8 @@
             } else if (state.view === 'manage-students') {
                 const filteredStudents = state.students.filter(s => s.name.toLowerCase().includes(state.searchQuery) || s.rollNo.includes(state.searchQuery));
                 const lastRoll = state.students.length > 0 ? Math.max(...state.students.map(s => parseInt(s.rollNo) || 0)) : 0;
-                
+                const nextRoll = lastRoll + 1;
+
                 container.innerHTML = `
                     <div class="p-6">
                         <div class="flex items-center gap-4 mb-6">
@@ -456,15 +792,15 @@
                                         <p class="text-[9px] font-black uppercase text-emerald-600 mb-1 ml-2">Phone Number</p>
                                         <input id="edit-student-contact" type="tel" class="w-full p-4 bg-white border border-emerald-200 rounded-2xl outline-none font-bold" value="${state.editingStudent.contactNo || ''}">
                                     </div>
-                                    <div class="w-[120px]">
+                                    <div class="w-[120px] flex-shrink-0">
                                         <p class="text-[9px] font-black uppercase text-emerald-600 mb-1 ml-2">Whose Number?</p>
                                         <input id="edit-student-relation" class="w-full p-4 bg-white border border-emerald-200 rounded-2xl outline-none font-bold text-center" value="${state.editingStudent.contactRelation || ''}" placeholder="Father?">
                                     </div>
                                 </div>
 
                                 <div class="flex gap-2 pt-2">
-                                    <button onclick="cancelEdit()" class="flex-1 bg-white text-slate-500 p-4 rounded-2xl font-black border border-slate-200 text-sm">Cancel</button>
-                                    <button onclick="saveEdit()" class="flex-[2] bg-emerald-600 text-white p-4 rounded-2xl font-black shadow-lg text-sm">Update</button>
+                                    <button onclick="cancelEdit()" class="flex-1 bg-white text-slate-500 p-4 rounded-2xl font-black border border-slate-200 active:scale-95 transition-all text-sm">Cancel</button>
+                                    <button onclick="saveEdit()" class="flex-[2] bg-emerald-600 text-white p-4 rounded-2xl font-black shadow-lg active:scale-95 transition-all text-sm">Update</button>
                                 </div>
                             </div>
                         ` : `
@@ -472,34 +808,33 @@
                                 <div class="flex gap-2 items-center">
                                     <div class="w-[80px] flex-shrink-0">
                                         <p class="text-[9px] font-black uppercase text-slate-400 mb-1 ml-2">Roll #</p>
-                                        <input id="new-student-roll" type="number" class="w-full p-4 bg-slate-50 border border-slate-200 rounded-2xl outline-none font-black text-center" value="${lastRoll + 1}">
+                                        <input id="new-student-roll" type="number" class="w-full p-4 bg-slate-50 border border-slate-200 rounded-2xl outline-none focus:ring-2 focus:ring-emerald-500 font-black text-center" value="${nextRoll}">
                                     </div>
                                     <div class="flex-1">
                                         <p class="text-[9px] font-black uppercase text-slate-400 mb-1 ml-2">Student Name</p>
-                                        <input id="new-student-name" class="w-full p-4 bg-slate-50 border border-slate-200 rounded-2xl outline-none" placeholder="Enter Name">
+                                        <input id="new-student-name" class="w-full p-4 bg-slate-50 border border-slate-200 rounded-2xl outline-none focus:ring-2 focus:ring-emerald-500" placeholder="Student Name">
                                     </div>
                                 </div>
-                                <p class="text-[9px] font-black uppercase text-slate-400 mb-1 ml-2">Father's Name</p>
-                                <input id="new-student-father" class="w-full p-4 bg-slate-50 border border-slate-200 rounded-2xl outline-none" placeholder="Enter Father Name">
+                                <input id="new-student-father" class="w-full p-4 bg-slate-50 border border-slate-200 rounded-2xl outline-none focus:ring-2 focus:ring-emerald-500" placeholder="Father's Name">
                                 
                                 <div class="flex gap-2 items-center">
                                     <div class="flex-1">
                                         <p class="text-[9px] font-black uppercase text-slate-400 mb-1 ml-2">Phone Number</p>
-                                        <input id="new-student-contact" type="tel" class="w-full p-4 bg-slate-50 border border-slate-200 rounded-2xl outline-none" placeholder="03xx-xxxxxxx">
+                                        <input id="new-student-contact" type="tel" class="w-full p-4 bg-slate-50 border border-slate-200 rounded-2xl outline-none focus:ring-2 focus:ring-emerald-500" placeholder="03xx-xxxxxxx">
                                     </div>
-                                    <div class="w-[120px]">
+                                    <div class="w-[120px] flex-shrink-0">
                                         <p class="text-[9px] font-black uppercase text-slate-400 mb-1 ml-2">Whose Number?</p>
-                                        <input id="new-student-relation" class="w-full p-4 bg-slate-50 border border-slate-200 rounded-2xl outline-none text-center font-bold" placeholder="Father?">
+                                        <input id="new-student-relation" class="w-full p-4 bg-slate-50 border border-slate-200 rounded-2xl outline-none focus:ring-2 focus:ring-emerald-500 text-center font-bold" placeholder="Father?">
                                     </div>
                                 </div>
 
-                                <button onclick="addStudent()" class="w-full bg-emerald-600 text-white p-4 rounded-2xl font-black shadow-lg flex items-center justify-center gap-2"><i data-lucide="plus-circle" class="w-5 h-5"></i> Register</button>
+                                <button onclick="addStudent()" class="w-full bg-emerald-600 text-white p-4 rounded-2xl font-black shadow-lg shadow-emerald-100 active:scale-95 transition-all flex items-center justify-center gap-2"><i data-lucide="plus-circle" class="w-5 h-5"></i> Enroll Student</button>
                             </div>
                         `}
 
                         <div class="mb-4 relative">
                             <i data-lucide="search" class="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400"></i>
-                            <input type="text" oninput="handleSearch(event)" value="${state.searchQuery}" class="w-full pl-11 pr-4 py-3 bg-white border border-slate-200 rounded-2xl outline-none text-sm font-medium" placeholder="Search List...">
+                            <input type="text" oninput="handleSearch(event)" value="${state.searchQuery}" class="w-full pl-11 pr-4 py-3 bg-white border border-slate-200 rounded-2xl outline-none focus:ring-2 focus:ring-emerald-500 text-sm font-medium" placeholder="Search students...">
                         </div>
 
                         <div class="space-y-3">
@@ -510,11 +845,92 @@
                                         <div><p class="font-bold text-slate-800 leading-tight">${s.name}</p><p class="text-[10px] text-slate-400 font-bold uppercase tracking-tight">${s.fatherName}</p></div>
                                     </div>
                                     <div class="flex gap-1">
-                                        <button onclick="startEditing('${s.id}')" class="p-2 text-slate-300 hover:text-emerald-500"><i data-lucide="user-cog" class="w-4.5 h-4.5"></i></button>
-                                        <button onclick="deleteStudent('${s.id}')" class="p-2 text-slate-200 hover:text-red-500"><i data-lucide="trash-2" class="w-4.5 h-4.5"></i></button>
+                                        <button onclick="startEditing('${s.id}')" class="p-2 text-slate-300 hover:text-emerald-500 transition-colors"><i data-lucide="user-cog" class="w-4.5 h-4.5"></i></button>
+                                        <button onclick="deleteStudent('${s.id}')" class="p-2 text-slate-200 hover:text-red-500 transition-colors"><i data-lucide="trash-2" class="w-4.5 h-4.5"></i></button>
                                     </div>
                                 </div>
                             `).join('')}
+                        </div>
+                    </div>
+                `;
+            } else if (state.view === 'weekly-register') {
+                const start = new Date(state.selectedWeekStart);
+                const days = [];
+                const dayNames = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+                for (let i = 0; i < 7; i++) {
+                    const next = new Date(start.getTime() + i * 24 * 3600000);
+                    days.push({
+                        dateStr: next.toISOString().split('T')[0],
+                        dayLabel: dayNames[i],
+                        dayNum: next.getDate()
+                    });
+                }
+
+                container.innerHTML = `
+                    <div class="p-6">
+                        <div class="flex items-center justify-between mb-6">
+                            <div class="flex items-center gap-3">
+                                <button onclick="setView('dashboard')" class="p-2 bg-emerald-50 text-emerald-700 rounded-full"><i data-lucide="arrow-left"></i></button>
+                                <h2 class="text-xl font-black text-emerald-900 leading-none">Weekly Register</h2>
+                            </div>
+                            <input type="date" value="${state.selectedWeekStart}" onchange="updateWeeklyStart(this.value)" class="p-2 bg-emerald-50 border-0 rounded-xl text-xs font-black text-emerald-700 outline-none">
+                        </div>
+
+                        <!-- Weekly Navigator -->
+                        <div class="flex justify-between items-center bg-emerald-600 text-white rounded-2xl p-4 mb-6 shadow-md">
+                            <button onclick="changeWeek(-1)" class="p-1 bg-white/20 rounded-lg hover:bg-white/30"><i data-lucide="chevron-left" class="w-5 h-5"></i></button>
+                            <div class="text-center">
+                                <p class="text-[10px] uppercase font-bold tracking-widest opacity-80 leading-none mb-1">Weekly Range</p>
+                                <p class="font-extrabold text-sm leading-none">${days[0].dayNum} ${start.toLocaleString('default', { month: 'short' })} – ${days[6].dayNum} ${new Date(state.selectedWeekStart).toLocaleString('default', { month: 'short' })}</p>
+                            </div>
+                            <button onclick="changeWeek(1)" class="p-1 bg-white/20 rounded-lg hover:bg-white/30"><i data-lucide="chevron-right" class="w-5 h-5"></i></button>
+                        </div>
+
+                        <!-- Grid Table Scrollable Container -->
+                        <div class="bg-white rounded-[28px] border border-slate-100 shadow-xl overflow-hidden p-4">
+                            <div class="overflow-x-auto">
+                                <table class="w-full text-left border-collapse">
+                                    <thead>
+                                        <tr class="border-b border-slate-100">
+                                            <th class="py-3 text-slate-400 font-bold text-[10px] uppercase tracking-wider w-8">Roll</th>
+                                            <th class="py-3 px-2 text-slate-400 font-bold text-[10px] uppercase tracking-wider min-w-[100px]">Student</th>
+                                            ${days.map(d => `
+                                                <th class="py-3 text-center min-w-[36px]">
+                                                    <p class="text-[9px] font-black text-slate-400 uppercase leading-none">${d.dayLabel}</p>
+                                                    <p class="text-[11px] font-extrabold text-slate-700 leading-none mt-1">${d.dayNum}</p>
+                                                </th>
+                                            `).join('')}
+                                        </tr>
+                                    </thead>
+                                    <tbody class="divide-y divide-slate-100">
+                                        ${state.students.map(s => {
+                                            return `
+                                                <tr>
+                                                    <td class="py-4 font-black text-emerald-700 text-xs">${s.rollNo}</td>
+                                                    <td class="py-4 px-2 font-bold text-slate-800 text-xs truncate max-w-[110px]">
+                                                        <p class="truncate leading-none">${s.name}</p>
+                                                        <p class="text-[8px] text-slate-400 uppercase truncate mt-1 font-semibold">${s.fatherName}</p>
+                                                    </td>
+                                                    ${days.map(d => {
+                                                        const record = state.allAttendance.find(r => r.date === d.dateStr);
+                                                        const status = record?.records?.[s.id] || '-';
+                                                        let badgeClass = "text-slate-300 font-bold text-xs";
+                                                        if (status === 'P') badgeClass = "bg-green-100 text-green-700 text-[10px] font-black rounded-lg w-7 h-7 flex items-center justify-center mx-auto";
+                                                        else if (status === 'A') badgeClass = "bg-red-100 text-red-700 text-[10px] font-black rounded-lg w-7 h-7 flex items-center justify-center mx-auto";
+                                                        else if (status === 'L') badgeClass = "bg-amber-100 text-amber-700 text-[10px] font-black rounded-lg w-7 h-7 flex items-center justify-center mx-auto";
+                                                        
+                                                        return `
+                                                            <td class="py-2.5 text-center">
+                                                                <span class="${badgeClass}">${status}</span>
+                                                            </td>
+                                                        `;
+                                                    }).join('')}
+                                                </tr>
+                                            `;
+                                        }).join('')}
+                                    </tbody>
+                                </table>
+                            </div>
                         </div>
                     </div>
                 `;
@@ -533,14 +949,26 @@
                         <div class="space-y-3">
                             ${filteredStudents.map(s => `
                                 <div class="bg-white p-4 rounded-3xl border border-slate-100 flex justify-between items-center shadow-sm">
-                                    <div class="flex items-center gap-4 overflow-hidden">
+                                    <div class="flex items-center gap-4 overflow-hidden flex-1 mr-2">
                                         <div class="w-10 h-10 bg-slate-900 text-white rounded-2xl flex-shrink-0 flex items-center justify-center font-black text-xs">${s.rollNo}</div>
-                                        <div class="truncate">
-                                            <p class="font-bold text-slate-800 leading-tight truncate">${s.name}</p>
-                                            <p class="text-[11px] text-emerald-600 font-black tracking-tight uppercase">${s.contactRelation || 'Phone'}: ${s.contactNo || 'No Number'}</p>
+                                        <div class="truncate flex-1">
+                                            <p class="font-black text-slate-800 leading-tight text-base truncate">${s.name}</p>
+                                            <p class="text-xs text-slate-500 font-medium mt-0.5">Father: <span class="text-slate-700 font-bold">${s.fatherName || '-'}</span></p>
+                                            <p class="text-[11px] text-emerald-700 font-bold mt-1.5 flex items-center gap-1">
+                                                <span class="px-2 py-0.5 bg-emerald-50 border border-emerald-100 text-emerald-800 rounded-md font-extrabold uppercase text-[9px] tracking-wide">${s.contactRelation || 'Relation'}</span>
+                                                <span class="font-mono text-slate-600">${s.contactNo || 'No Number'}</span>
+                                            </p>
                                         </div>
                                     </div>
-                                    ${s.contactNo ? `<a href="tel:${s.contactNo}" class="w-12 h-12 bg-emerald-100 text-emerald-600 rounded-2xl flex items-center justify-center"><i data-lucide="phone-call" class="w-5 h-5"></i></a>` : `<div class="w-12 h-12 bg-slate-50 text-slate-200 rounded-2xl flex items-center justify-center"><i data-lucide="phone-off" class="w-5 h-5"></i></div>`}
+                                    ${s.contactNo ? `
+                                        <button onclick="confirmAndCall('${s.name}', '${s.fatherName || ''}', '${s.contactRelation || 'Father'}', '${s.contactNo}')" class="w-12 h-12 bg-emerald-100 text-emerald-600 hover:bg-emerald-200 rounded-2xl flex items-center justify-center transition-all flex-shrink-0">
+                                            <i data-lucide="phone-call" class="w-5 h-5"></i>
+                                        </button>
+                                    ` : `
+                                        <div class="w-12 h-12 bg-slate-50 text-slate-200 rounded-2xl flex items-center justify-center flex-shrink-0">
+                                            <i data-lucide="phone-off" class="w-5 h-5"></i>
+                                        </div>
+                                    `}
                                 </div>
                             `).join('')}
                         </div>
@@ -553,27 +981,39 @@
                         <div class="flex items-center justify-between mb-4">
                             <div class="flex items-center gap-3">
                                 <button onclick="setView('dashboard')" class="p-2 bg-emerald-50 text-emerald-700 rounded-full"><i data-lucide="arrow-left"></i></button>
-                                <h2 class="text-xl font-black text-emerald-900">Daily Log</h2>
+                                <h2 class="text-xl font-black text-emerald-900">Attendance</h2>
                             </div>
                             <input type="date" value="${state.selectedDate}" onchange="updateDate(this.value)" class="p-2 bg-emerald-50 border-0 rounded-xl text-xs font-black text-emerald-700 outline-none">
                         </div>
+                        <div class="mb-4 relative">
+                            <i data-lucide="search" class="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400"></i>
+                            <input type="text" oninput="handleSearch(event)" value="${state.searchQuery}" class="w-full pl-11 pr-4 py-3 bg-white border border-slate-200 rounded-2xl outline-none text-sm font-medium" placeholder="Quick Search...">
+                        </div>
+                        
+                        <!-- EQUAL THREE WAY BULK ACTION ROW -->
+                        <div class="flex gap-2 mb-6">
+                            <button onclick="markAll('P')" class="flex-1 py-3 bg-emerald-50 text-emerald-700 border border-emerald-100 rounded-2xl text-[10px] font-black uppercase tracking-widest active:scale-95 transition-all">All Present</button>
+                            <button onclick="markAll('A')" class="flex-1 py-3 bg-red-50 text-red-700 border border-red-100 rounded-2xl text-[10px] font-black uppercase tracking-widest active:scale-95 transition-all">All Absent</button>
+                            <button onclick="markAll('L')" class="flex-1 py-3 bg-amber-50 text-amber-700 border border-amber-100 rounded-2xl text-[10px] font-black uppercase tracking-widest active:scale-95 transition-all">All Leave</button>
+                        </div>
+
                         <div class="space-y-3">
                             ${filteredStudents.map(s => `
-                                <div class="bg-white p-3 pr-2 rounded-[28px] border border-slate-100 shadow-sm flex justify-between items-center">
+                                <div class="bg-white p-3 pr-2 rounded-[28px] border border-slate-100 shadow-sm flex justify-between items-center transition-all">
                                     <div class="flex-1 min-w-0 flex items-center gap-3">
-                                        <div class="text-[11px] font-black text-slate-300 w-6 flex-shrink-0">${s.rollNo}</div>
+                                        <div class="text-[11px] font-black text-slate-300 w-6 flex-shrink-0 text-center">${s.rollNo}</div>
                                         <div class="truncate"><p class="font-bold text-slate-800 text-md truncate leading-tight">${s.name}</p><p class="text-[9px] text-slate-400 font-bold uppercase truncate tracking-tight">${s.fatherName}</p></div>
                                     </div>
                                     <div class="flex gap-1">
                                         ${['P', 'A', 'L'].map(st => `
-                                            <button onclick="setStatus('${s.id}', '${st}')" class="w-11 h-11 rounded-2xl font-black text-xs ${state.currentDayAttendance[s.id] === st ? (st === 'P' ? 'bg-emerald-500 text-white shadow-lg scale-105' : st === 'A' ? 'bg-red-500 text-white shadow-lg scale-105' : 'bg-amber-500 text-white shadow-lg scale-105') : 'bg-slate-50 text-slate-300'}">${st}</button>
+                                            <button onclick="setStatus('${s.id}', '${st}')" class="w-11 h-11 rounded-2xl font-black text-xs transition-all tap-highlight-none ${state.currentDayAttendance[s.id] === st ? (st === 'P' ? 'bg-emerald-500 text-white shadow-lg scale-105' : st === 'A' ? 'bg-red-500 text-white shadow-lg scale-105' : 'bg-amber-500 text-white shadow-lg scale-105') : 'bg-slate-50 text-slate-300'}">${st}</button>
                                         `).join('')}
                                     </div>
                                 </div>
                             `).join('')}
                         </div>
                         <div class="fixed bottom-0 left-0 right-0 max-w-lg mx-auto p-4 bg-white/95 backdrop-blur-md border-t border-slate-100 z-40">
-                            <button onclick="saveAttendance()" class="w-full bg-emerald-600 text-white py-4 rounded-3xl font-black text-lg shadow-xl shadow-emerald-100 active:scale-95 transition-all">COMMIT ATTENDANCE</button>
+                            <button onclick="saveAttendance()" class="w-full bg-emerald-600 text-white py-4 rounded-3xl font-black text-lg shadow-xl active:scale-95 transition-all">COMMIT ATTENDANCE</button>
                         </div>
                     </div>
                 `;
@@ -598,9 +1038,14 @@
                         </div>
 
                         <div class="bg-emerald-600 text-white p-5 rounded-[32px] mb-6 shadow-lg relative overflow-hidden flex justify-between items-center">
-                             <div><p class="text-[10px] font-black uppercase opacity-80 mb-1 leading-none">Register Summary:</p><p class="font-black text-xl">${new Date(state.selectedReportMonth + '-01').toLocaleString('default', { month: 'long', year: 'numeric' })}</p></div>
-                             <button onclick="downloadExcelReport()" class="bg-white/20 p-3 rounded-2xl border border-white/20 active:scale-90"><i data-lucide="file-spreadsheet" class="w-6 h-6 text-white"></i></button>
+                             <div>
+                                <p class="text-[10px] font-black uppercase opacity-80 mb-1 leading-none">Register Summary:</p>
+                                <p class="font-black text-xl">${new Date(state.selectedReportMonth + '-01').toLocaleString('default', { month: 'long', year: 'numeric' })}</p>
+                             </div>
+                             <button onclick="downloadExcelReport()" class="bg-white/20 p-3 rounded-2xl border border-white/20 active:scale-90"><i data-lucide="file-down" class="w-6 h-6 text-white"></i></button>
                         </div>
+
+                        <button onclick="downloadExcelReport()" class="w-full mb-6 bg-emerald-50 text-emerald-700 py-4 rounded-2xl font-black text-xs border border-emerald-100 flex items-center justify-center gap-2 active:scale-95 transition-all uppercase tracking-widest"><i data-lucide="download" class="w-4 h-4"></i> Get Excel Spreadsheet</button>
 
                         <div class="bg-white rounded-[36px] border border-slate-100 shadow-xl overflow-hidden">
                             <table class="w-full text-[11px]">
@@ -614,6 +1059,23 @@
                                     }).join('')}
                                 </tbody>
                             </table>
+                        </div>
+                    </div>
+                `;
+            } else if (state.view === 'backup') {
+                container.innerHTML = `
+                    <div class="p-6">
+                        <div class="flex items-center gap-4 mb-10">
+                            <button onclick="setView('dashboard')" class="p-2 bg-emerald-50 text-emerald-700 rounded-full"><i data-lucide="arrow-left"></i></button>
+                            <h2 class="text-xl font-black text-emerald-900 leading-none">Security</h2>
+                        </div>
+                        <div class="bg-white p-12 rounded-[52px] border-2 border-emerald-50 shadow-2xl text-center space-y-8">
+                            <div class="w-24 h-24 bg-emerald-600 text-white rounded-[36px] flex items-center justify-center mx-auto shadow-emerald-200 shadow-2xl"><i data-lucide="database-backup" class="w-12 h-12"></i></div>
+                            <div>
+                                <h3 class="text-2xl font-black text-slate-900 mb-2 leading-tight">Master Backup</h3>
+                                <p class="text-sm text-slate-500 font-medium px-4 leading-relaxed tracking-tight">Keep an offline record of every student and every attendance day in your private storage.</p>
+                            </div>
+                            <button onclick="downloadBackup()" class="w-full bg-emerald-600 text-white py-5 rounded-3xl font-black shadow-lg shadow-emerald-100 active:scale-95 transition-all tracking-widest uppercase text-xs">Download Full JSON Archive</button>
                         </div>
                     </div>
                 `;
