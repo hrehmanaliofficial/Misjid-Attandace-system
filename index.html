@@ -132,15 +132,18 @@
             view: 'login',
             students: [],
             allAttendance: [],
+            holidays: [], // Custom planned offs
+            leaves: [],    // Custom range leaves
             selectedDate: new Date().toISOString().split('T')[0],
             selectedReportMonth: new Date().toISOString().slice(0, 7),
             selectedWeekStart: getMonday(new Date()).toISOString().split('T')[0],
             currentDayAttendance: {},
+            currentDayReasons: {}, // Stored daily leave reasons
             searchQuery: '',
             editingStudent: null
         };
 
-        // --- AUTH & NETWORK LOGIC ---
+        // --- STREAMING_CHUNK: Loading authentications and network bindings... ---
         const initAuth = async (retries = 5) => {
             const delay = (ms) => new Promise(res => setTimeout(res, ms));
             for (let i = 0; i < retries; i++) {
@@ -186,6 +189,7 @@
         window.addEventListener('online', () => updateNetworkStatus(true));
         window.addEventListener('offline', () => updateNetworkStatus(false));
 
+        // --- STREAMING_CHUNK: Initializing snapshot listeners for Students, Attendance, Holidays, and Leaves... ---
         function startListeners() {
             if (!state.user) return;
             onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'students'), (snap) => {
@@ -198,6 +202,26 @@
                 state.allAttendance = snap.docs.map(d => ({ date: d.id, ...d.data() }));
                 render();
             });
+
+            onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'holidays'), (snap) => {
+                state.holidays = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+                render();
+            });
+
+            onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'leaves'), (snap) => {
+                state.leaves = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+                render();
+            });
+        }
+
+        // Helper to evaluate active range leaves for a student on a specific date
+        function getActiveLeave(studentId, dateStr) {
+            return state.leaves.find(l => l.studentId === studentId && dateStr >= l.startDate && dateStr <= l.endDate);
+        }
+
+        // Helper to evaluate range-based planned offs / holidays
+        function getActiveHoliday(dateStr) {
+            return state.holidays.find(h => dateStr >= h.startDate && dateStr <= h.endDate);
         }
 
         async function fetchDayAttendance(date) {
@@ -206,16 +230,42 @@
             try {
                 const snap = await getDoc(docRef);
                 if (snap.exists()) {
-                    state.currentDayAttendance = snap.data().records || {};
+                    const data = snap.data();
+                    state.currentDayAttendance = data.records || {};
+                    state.currentDayReasons = data.reasons || {};
+                    
+                    // Auto override to L if student is on a scheduled range leave, or initialize new students
+                    state.students.forEach(s => {
+                        const activeLeave = getActiveLeave(s.id, date);
+                        if (activeLeave) {
+                            state.currentDayAttendance[s.id] = 'L';
+                            state.currentDayReasons[s.id] = activeLeave.reason;
+                        } else if (state.currentDayAttendance[s.id] === undefined) {
+                            state.currentDayAttendance[s.id] = 'P';
+                            state.currentDayReasons[s.id] = '';
+                        }
+                    });
                 } else {
                     const defaults = {};
-                    state.students.forEach(s => defaults[s.id] = 'P');
+                    const defaultReasons = {};
+                    state.students.forEach(s => {
+                        const activeLeave = getActiveLeave(s.id, date);
+                        if (activeLeave) {
+                            defaults[s.id] = 'L';
+                            defaultReasons[s.id] = activeLeave.reason;
+                        } else {
+                            defaults[s.id] = 'P';
+                            defaultReasons[s.id] = '';
+                        }
+                    });
                     state.currentDayAttendance = defaults;
+                    state.currentDayReasons = defaultReasons;
                 }
             } catch (e) { showToast("Local Mode"); }
             render();
         }
 
+        // --- STREAMING_CHUNK: Defining router & basic authentication logic... ---
         window.handleLogin = (e) => {
             if (e) e.preventDefault();
             const userIn = document.getElementById('login-user').value.toLowerCase().trim();
@@ -246,6 +296,7 @@
             render();
         };
 
+        // --- STREAMING_CHUNK: Handling enrollment and record writing controllers... ---
         window.addStudent = async () => {
             const name = document.getElementById('new-student-name').value.trim();
             const father = document.getElementById('new-student-father').value.trim();
@@ -274,7 +325,6 @@
         window.startEditing = (studentId) => {
             state.editingStudent = state.students.find(s => s.id === studentId);
             render();
-            // SMOOTH AUTO-SCROLL TO FORM HEAD AT THE TOP
             const mainContent = document.getElementById('main-content');
             if (mainContent) {
                 mainContent.scrollTo({ top: 0, behavior: 'smooth' });
@@ -316,6 +366,57 @@
             }
         };
 
+        // --- STREAMING_CHUNK: Implementing planned class-offs & Range leave planners... ---
+        window.addClassOff = async () => {
+            const start = document.getElementById('holiday-start-date').value;
+            const end = document.getElementById('holiday-end-date').value;
+            const label = document.getElementById('holiday-label').value.trim();
+            if (!start || !end || !label) return showToast("Required: Start Date, End Date, and Label", "alert-circle");
+
+            try {
+                await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'holidays'), {
+                    startDate: start,
+                    endDate: end,
+                    label: label
+                });
+                showToast("Planned Off Registered", "check-circle");
+                document.getElementById('holiday-label').value = '';
+            } catch (e) { showToast("Failed to save holiday"); }
+        };
+
+        window.deleteClassOff = async (id) => {
+            if (confirm("Cancel this planned off?")) {
+                await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'holidays', id));
+                showToast("Planned Off Removed", "trash-2");
+            }
+        };
+
+        window.addLeaveRequest = async () => {
+            const sid = document.getElementById('leave-student-id').value;
+            const start = document.getElementById('leave-start-date').value;
+            const end = document.getElementById('leave-end-date').value;
+            const reason = document.getElementById('leave-reason').value.trim();
+
+            if (!sid || !start || !end || !reason) return showToast("Please fill all leave planner fields", "alert-circle");
+            try {
+                await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'leaves'), {
+                    studentId: sid,
+                    startDate: start,
+                    endDate: end,
+                    reason: reason
+                });
+                showToast("Range Leave Stored", "check-circle");
+                document.getElementById('leave-reason').value = '';
+            } catch (e) { showToast("Failed to save leave planner"); }
+        };
+
+        window.deleteLeaveRequest = async (id) => {
+            if (confirm("Remove this leave record?")) {
+                await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'leaves', id));
+                showToast("Leave Record Deleted", "trash-2");
+            }
+        };
+
         window.updateDate = (val) => {
             state.selectedDate = val;
             fetchDayAttendance(val);
@@ -340,11 +441,21 @@
 
         window.setStatus = (sid, status) => {
             state.currentDayAttendance[sid] = status;
+            if (status !== 'L') {
+                state.currentDayReasons[sid] = '';
+            }
             render();
         };
 
+        window.updateLeaveReason = (sid, reasonVal) => {
+            state.currentDayReasons[sid] = reasonVal;
+        };
+
         window.markAll = (status) => {
-            state.students.forEach(s => state.currentDayAttendance[s.id] = status);
+            state.students.forEach(s => {
+                state.currentDayAttendance[s.id] = status;
+                if (status !== 'L') state.currentDayReasons[s.id] = '';
+            });
             render();
         };
 
@@ -352,7 +463,8 @@
             try {
                 await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'attendance', state.selectedDate), {
                     date: state.selectedDate,
-                    records: state.currentDayAttendance
+                    records: state.currentDayAttendance,
+                    reasons: state.currentDayReasons || {}
                 });
                 showToast("Saved to Cloud", "cloud-upload");
                 setView('dashboard');
@@ -383,62 +495,46 @@
             }, 300);
         };
 
-        // --- STYLED EXCELJS EXPORT SYSTEM WITH HIGH-CONTRAST AND THICK BORDERS ---
+        // --- STREAMING_CHUNK: Designing professional ExcelJS export with high-contrast holiday rendering... ---
         window.downloadExcelReport = async () => {
             try {
                 const [year, month] = state.selectedReportMonth.split('-').map(Number);
                 const daysInMonth = new Date(year, month, 0).getDate();
                 const monthName = new Date(year, month - 1, 1).toLocaleString('default', { month: 'long', year: 'numeric' });
 
-                // Initialize ExcelJS Workbook
                 const workbook = new ExcelJS.Workbook();
-                
-                // Add Sheets
                 const wsRegister = workbook.addWorksheet("Monthly Register", { views: [{ showGridLines: true }] });
                 const wsDirectory = workbook.addWorksheet("Contact Directory", { views: [{ showGridLines: true }] });
 
-                // --- STYLE DEF TOKENS ---
                 const borderThin = { style: 'thin', color: { argb: 'FFCBD5E1' } };
-                const borderThickDivider = { style: 'medium', color: { argb: 'FF1E293B' } }; // Deep divider
-                const borderDoubleRight = { style: 'medium', color: { argb: 'FF000000' } }; // Black divider
+                const borderThickDivider = { style: 'medium', color: { argb: 'FF1E293B' } };
+                const borderDoubleRight = { style: 'medium', color: { argb: 'FF000000' } };
 
-                const standardBorder = {
-                    top: borderThin, left: borderThin, bottom: borderThin, right: borderThin
-                };
-                
-                const dividerBorder = {
-                    top: borderThin, left: borderThin, bottom: borderThin, right: borderThickDivider
-                };
+                const standardBorder = { top: borderThin, left: borderThin, bottom: borderThin, right: borderThin };
+                const dividerBorder = { top: borderThin, left: borderThin, bottom: borderThin, right: borderThickDivider };
+                const doubleDividerBorder = { top: borderThin, left: borderThin, bottom: borderThin, right: borderDoubleRight };
 
-                const doubleDividerBorder = {
-                    top: borderThin, left: borderThin, bottom: borderThin, right: borderDoubleRight
-                };
-
-                // --- TAB 1: MONTHLY REGISTER ---
                 const colPctIdx = 7 + daysInMonth;
 
-                // Merge Header Title Row 1
+                // Title merged block
                 wsRegister.mergeCells(1, 1, 1, colPctIdx);
                 const titleCell = wsRegister.getCell('A1');
                 titleCell.value = `MASJID ATTENDANCE REGISTER - ${monthName.toUpperCase()}`;
                 titleCell.font = { name: 'Inter', bold: true, size: 14, color: { argb: 'FFFFFFFF' } };
-                titleCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF047857' } }; // Emerald Green
+                titleCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF047857' } };
                 titleCell.alignment = { horizontal: 'center', vertical: 'middle' };
                 wsRegister.getRow(1).height = 40;
 
-                // Merge Subtitle Row 2
                 wsRegister.mergeCells(2, 1, 2, colPctIdx);
                 const subCell = wsRegister.getCell('A2');
                 subCell.value = "Class Teacher: Hafiz Rehman Ali";
                 subCell.font = { name: 'Inter', bold: true, size: 10, color: { argb: 'FFD1FAE5' } };
-                subCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF065F46' } }; // Darker Emerald
+                subCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF065F46' } };
                 subCell.alignment = { horizontal: 'center', vertical: 'middle' };
                 wsRegister.getRow(2).height = 24;
 
-                // Spacing Row 3
                 wsRegister.getRow(3).height = 15;
 
-                // Table Headers Row 4
                 const headerRow = wsRegister.getRow(4);
                 headerRow.height = 28;
 
@@ -449,46 +545,50 @@
                 headerRow.getCell(2).border = dividerBorder;
                 
                 headerRow.getCell(3).value = "Father Name";
-                headerRow.getCell(3).border = doubleDividerBorder; // Deep vertical separating block
+                headerRow.getCell(3).border = doubleDividerBorder;
 
-                // Daily headers (1 to daysInMonth)
                 for (let d = 1; d <= daysInMonth; d++) {
                     const colIdx = 3 + d;
                     const cell = headerRow.getCell(colIdx);
                     cell.value = d;
                     cell.border = (d === daysInMonth) ? doubleDividerBorder : standardBorder;
                     cell.alignment = { horizontal: 'center', vertical: 'middle' };
+                    
+                    // If this date is a holiday, shade header gray
+                    const dateStr = `${state.selectedReportMonth}-${String(d).padStart(2, '0')}`;
+                    if (getActiveHoliday(dateStr)) {
+                        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE2E8F0' } };
+                    }
                 }
 
-                // Summary Headers (P, A, L, %)
                 const colPIdx = 4 + daysInMonth;
                 const colAIdx = 5 + daysInMonth;
                 const colLIdx = 6 + daysInMonth;
                 const colPct = colPctIdx;
 
                 headerRow.getCell(colPIdx).value = "P";
-                headerRow.getCell(colPIdx).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD1FAE5' } }; // Green fill
+                headerRow.getCell(colPIdx).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD1FAE5' } };
                 headerRow.getCell(colPIdx).border = standardBorder;
                 headerRow.getCell(colPIdx).alignment = { horizontal: 'center' };
 
                 headerRow.getCell(colAIdx).value = "A";
-                headerRow.getCell(colAIdx).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFEE2E2' } }; // Red fill
+                headerRow.getCell(colAIdx).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFEE2E2' } };
                 headerRow.getCell(colAIdx).border = standardBorder;
                 headerRow.getCell(colAIdx).alignment = { horizontal: 'center' };
 
                 headerRow.getCell(colLIdx).value = "L";
-                headerRow.getCell(colLIdx).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFEF3C7' } }; // Amber fill
+                headerRow.getCell(colLIdx).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFEF3C7' } };
                 headerRow.getCell(colLIdx).border = standardBorder;
                 headerRow.getCell(colLIdx).alignment = { horizontal: 'center' };
 
                 headerRow.getCell(colPct).value = "Percentage (%)";
-                headerRow.getCell(colPct).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF1F5F9' } }; // Slate fill
+                headerRow.getCell(colPct).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF1F5F9' } };
                 headerRow.getCell(colPct).border = standardBorder;
                 headerRow.getCell(colPct).alignment = { horizontal: 'center' };
 
                 headerRow.font = { name: 'Inter', bold: true, size: 10, color: { argb: 'FF1E293B' } };
 
-                // Build Student rows starting Row 5
+                // Build student register rows
                 state.students.forEach((s, sIdx) => {
                     const rNum = 5 + sIdx;
                     const row = wsRegister.getRow(rNum);
@@ -507,41 +607,43 @@
                     row.getCell(3).value = s.fatherName || '-';
                     row.getCell(3).font = { name: 'Inter', size: 9, color: { argb: 'FF475569' } };
                     row.getCell(3).alignment = { horizontal: 'left', vertical: 'middle' };
-                    row.getCell(3).border = doubleDividerBorder; // Deep vertical line separating student info from days
+                    row.getCell(3).border = doubleDividerBorder;
 
                     let pTot = 0, aTot = 0, lTot = 0;
                     for (let d = 1; d <= daysInMonth; d++) {
                         const dateStr = `${state.selectedReportMonth}-${String(d).padStart(2, '0')}`;
+                        const isHoliday = getActiveHoliday(dateStr);
                         const dayRecord = state.allAttendance.find(rec => rec.date === dateStr);
-                        const status = dayRecord?.records?.[s.id] || "-";
+                        let status = dayRecord?.records?.[s.id] || "-";
 
                         const cell = row.getCell(3 + d);
-                        cell.value = status;
                         cell.alignment = { horizontal: 'center', vertical: 'middle' };
-                        
-                        // Set Border Block separation
                         cell.border = (d === daysInMonth) ? doubleDividerBorder : standardBorder;
 
-                        // High contrast coloration
-                        if (status === 'P') {
-                            pTot++;
-                            cell.font = { name: 'Inter', bold: true, size: 9, color: { argb: 'FF15803D' } };
-                            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFDCFCE7' } };
-                        } else if (status === 'A') {
-                            aTot++;
-                            // CRITICAL HIGH CONTRAST BRIGHT RED background for Absents (A)
-                            cell.font = { name: 'Inter', bold: true, size: 10, color: { argb: 'FFB91C1C' } };
-                            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFCA5A5' } }; // Light red fill
-                        } else if (status === 'L') {
-                            lTot++;
-                            cell.font = { name: 'Inter', bold: true, size: 9, color: { argb: 'FFD97706' } };
-                            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFEF3C7' } };
+                        if (isHoliday) {
+                            cell.value = "H";
+                            cell.font = { name: 'Inter', bold: true, size: 9, color: { argb: 'FF475569' } };
+                            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF1F5F9' } };
                         } else {
-                            cell.font = { name: 'Inter', size: 9, color: { argb: 'FF94A3B8' } };
+                            cell.value = status;
+                            if (status === 'P') {
+                                pTot++;
+                                cell.font = { name: 'Inter', bold: true, size: 9, color: { argb: 'FF15803D' } };
+                                cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFDCFCE7' } };
+                            } else if (status === 'A') {
+                                aTot++;
+                                cell.font = { name: 'Inter', bold: true, size: 10, color: { argb: 'FFB91C1C' } };
+                                cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFCA5A5' } };
+                            } else if (status === 'L') {
+                                lTot++;
+                                cell.font = { name: 'Inter', bold: true, size: 9, color: { argb: 'FFD97706' } };
+                                cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFEF3C7' } };
+                            } else {
+                                cell.font = { name: 'Inter', size: 9, color: { argb: 'FF94A3B8' } };
+                            }
                         }
                     }
 
-                    // Totals & Percentage Calculations
                     row.getCell(colPIdx).value = pTot;
                     row.getCell(colPIdx).font = { name: 'Inter', bold: true, size: 10, color: { argb: 'FF15803D' } };
                     row.getCell(colPIdx).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFDCFCE7' } };
@@ -569,24 +671,23 @@
                     row.getCell(colPct).alignment = { horizontal: 'center', vertical: 'middle' };
                 });
 
-                // Configure Column Widths for Register
-                wsRegister.getColumn(1).width = 9;   // Roll No
-                wsRegister.getColumn(2).width = 24;  // Name
-                wsRegister.getColumn(3).width = 24;  // Father Name
+                wsRegister.getColumn(1).width = 9;
+                wsRegister.getColumn(2).width = 24;
+                wsRegister.getColumn(3).width = 24;
                 for (let d = 1; d <= daysInMonth; d++) {
-                    wsRegister.getColumn(3 + d).width = 5; // Date columns
+                    wsRegister.getColumn(3 + d).width = 5;
                 }
                 wsRegister.getColumn(colPIdx).width = 6;
                 wsRegister.getColumn(colAIdx).width = 6;
                 wsRegister.getColumn(colLIdx).width = 6;
-                wsRegister.getColumn(colPct).width = 16; // Percentage Column
+                wsRegister.getColumn(colPct).width = 16;
 
                 // --- TAB 2: CONTACT DIRECTORY ---
                 wsDirectory.mergeCells(1, 1, 1, 5);
                 const dTitle = wsDirectory.getCell('A1');
                 dTitle.value = "STUDENT CONTACT DIRECTORY";
                 dTitle.font = { name: 'Inter', bold: true, size: 14, color: { argb: 'FFFFFFFF' } };
-                dTitle.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1E293B' } }; // Cool Dark Slate
+                dTitle.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1E293B' } };
                 dTitle.alignment = { horizontal: 'center', vertical: 'middle' };
                 wsDirectory.getRow(1).height = 40;
 
@@ -631,7 +732,7 @@
 
                     row.getCell(4).value = s.contactRelation || 'Father';
                     row.getCell(4).font = { name: 'Inter', bold: true, size: 10, color: { argb: 'FF0F766E' } };
-                    row.getCell(4).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF0FDF4' } }; // Soft Teal highlight
+                    row.getCell(4).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF0FDF4' } };
                     row.getCell(4).alignment = { horizontal: 'center', vertical: 'middle' };
 
                     row.getCell(5).value = s.contactNo || '-';
@@ -643,14 +744,66 @@
                     }
                 });
 
-                // Configure Column Widths for Directory
                 wsDirectory.getColumn(1).width = 12;
                 wsDirectory.getColumn(2).width = 25;
                 wsDirectory.getColumn(3).width = 25;
                 wsDirectory.getColumn(4).width = 18;
                 wsDirectory.getColumn(5).width = 22;
 
-                // Write and Trigger native OpenXML XLSX Download
+                // --- TAB 3: LEAVE EXPLANATIONS ---
+                const wsReasons = workbook.addWorksheet("Leave Explanations", { views: [{ showGridLines: true }] });
+                wsReasons.mergeCells(1, 1, 1, 4);
+                const rTitle = wsReasons.getCell('A1');
+                rTitle.value = "RECORDED LEAVE EXPLANATIONS";
+                rTitle.font = { name: 'Inter', bold: true, size: 14, color: { argb: 'FFFFFFFF' } };
+                rTitle.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD97706' } }; // Amber Header
+                rTitle.alignment = { horizontal: 'center', vertical: 'middle' };
+                wsReasons.getRow(1).height = 40;
+
+                const rHeaderRow = wsReasons.getRow(3);
+                rHeaderRow.height = 24;
+                const rHeaders = ["Date", "Roll No", "Student Name", "Reason / Explanation"];
+                rHeaders.forEach((h, idx) => {
+                    const cell = rHeaderRow.getCell(idx + 1);
+                    cell.value = h;
+                    cell.font = { name: 'Inter', bold: true, size: 10, color: { argb: 'FF1E293B' } };
+                    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF1F5F9' } };
+                    cell.border = standardBorder;
+                });
+
+                let rIdx = 4;
+                const filteredAtt = state.allAttendance.filter(day => day.date.startsWith(state.selectedReportMonth));
+                filteredAtt.forEach(day => {
+                    if (day.reasons) {
+                        Object.entries(day.reasons).forEach(([sid, reason]) => {
+                            if (reason && reason.trim() !== '') {
+                                const student = state.students.find(s => s.id === sid);
+                                if (student) {
+                                    const row = wsReasons.getRow(rIdx);
+                                    row.height = 22;
+                                    row.getCell(1).value = day.date;
+                                    row.getCell(2).value = parseInt(student.rollNo) || '';
+                                    row.getCell(3).value = student.name;
+                                    row.getCell(4).value = reason;
+
+                                    for (let col = 1; col <= 4; col++) {
+                                        row.getCell(col).border = standardBorder;
+                                        row.getCell(col).font = { name: 'Inter', size: 9 };
+                                    }
+                                    row.getCell(1).alignment = { horizontal: 'center' };
+                                    row.getCell(2).alignment = { horizontal: 'center' };
+                                    rIdx++;
+                                }
+                            }
+                        });
+                    }
+                });
+
+                wsReasons.getColumn(1).width = 15;
+                wsReasons.getColumn(2).width = 10;
+                wsReasons.getColumn(3).width = 25;
+                wsReasons.getColumn(4).width = 40;
+
                 const buffer = await workbook.xlsx.writeBuffer();
                 const blob = new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
                 const url = URL.createObjectURL(blob);
@@ -666,7 +819,7 @@
         };
 
         window.downloadBackup = () => {
-            const data = { students: state.students, attendance: state.allAttendance };
+            const data = { students: state.students, attendance: state.allAttendance, holidays: state.holidays, leaves: state.leaves };
             const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
@@ -688,6 +841,7 @@
             }, 3000);
         }
 
+        // --- STREAMING_CHUNK: Starting user interface rendering engine... ---
         function render() {
             const container = document.getElementById('view-container');
             if (!container) return;
@@ -709,6 +863,7 @@
                     </div>
                 `;
             } else if (state.view === 'dashboard') {
+                // --- STREAMING_CHUNK: Rendering Dashboard view layout... ---
                 container.innerHTML = `
                     <div class="p-6">
                         <header class="flex justify-between items-start mb-8">
@@ -740,6 +895,14 @@
                                 <i data-lucide="phone" class="mb-2 w-7 h-7 text-emerald-600"></i>
                                 <span class="font-bold text-sm">Contact Log</span>
                             </button>
+                            <button onclick="setView('class-holidays')" class="flex flex-col items-center justify-center p-5 bg-white text-slate-700 border border-slate-200 rounded-[28px] shadow-sm active:scale-95 transition-all">
+                                <i data-lucide="calendar-days" class="mb-2 w-7 h-7 text-emerald-600"></i>
+                                <span class="font-bold text-sm">Class Holidays</span>
+                            </button>
+                            <button onclick="setView('leave-planner')" class="flex flex-col items-center justify-center p-5 bg-white text-slate-700 border border-slate-200 rounded-[28px] shadow-sm active:scale-95 transition-all">
+                                <i data-lucide="calendar-heart" class="mb-2 w-7 h-7 text-emerald-600"></i>
+                                <span class="font-bold text-sm">Leave Planner</span>
+                            </button>
                             <button onclick="setView('backup')" class="flex flex-col items-center justify-center p-5 bg-white text-slate-700 border border-slate-200 rounded-[28px] shadow-sm active:scale-95 transition-all">
                                 <i data-lucide="database" class="mb-2 w-7 h-7 text-emerald-600"></i>
                                 <span class="font-bold text-sm">Backup</span>
@@ -765,6 +928,7 @@
                 const lastRoll = state.students.length > 0 ? Math.max(...state.students.map(s => parseInt(s.rollNo) || 0)) : 0;
                 const nextRoll = lastRoll + 1;
 
+                // --- STREAMING_CHUNK: Rendering Enrollment view with smooth-scrolling forms... ---
                 container.innerHTML = `
                     <div class="p-6">
                         <div class="flex items-center gap-4 mb-6">
@@ -853,6 +1017,92 @@
                         </div>
                     </div>
                 `;
+            } else if (state.view === 'class-holidays') {
+                // --- STREAMING_CHUNK: Building Holiday registry view... ---
+                container.innerHTML = `
+                    <div class="p-6">
+                        <div class="flex items-center gap-4 mb-6">
+                            <button onclick="setView('dashboard')" class="p-2 bg-emerald-50 text-emerald-700 rounded-full"><i data-lucide="arrow-left"></i></button>
+                            <h2 class="text-xl font-black text-emerald-900 leading-none">Planned Offs</h2>
+                        </div>
+
+                        <div class="bg-white p-5 rounded-[32px] border-2 border-slate-100 shadow-sm space-y-4 mb-8">
+                            <p class="text-[10px] font-black uppercase text-emerald-600 tracking-widest ml-1">Add Holiday / Vacations</p>
+                            <div class="flex gap-2">
+                                <div class="flex-1">
+                                    <p class="text-[9px] font-black uppercase text-slate-400 mb-1 ml-2">Start Date</p>
+                                    <input id="holiday-start-date" type="date" class="w-full p-4 bg-slate-50 border border-slate-200 rounded-2xl outline-none font-bold text-xs">
+                                </div>
+                                <div class="flex-1">
+                                    <p class="text-[9px] font-black uppercase text-slate-400 mb-1 ml-2">End Date</p>
+                                    <input id="holiday-end-date" type="date" class="w-full p-4 bg-slate-50 border border-slate-200 rounded-2xl outline-none font-bold text-xs">
+                                </div>
+                            </div>
+                            <input id="holiday-label" type="text" class="w-full p-4 bg-slate-50 border border-slate-200 rounded-2xl outline-none" placeholder="Reason (e.g., Eid Ul Fitr Holidays)">
+                            <button onclick="addClassOff()" class="w-full bg-emerald-600 text-white p-4 rounded-2xl font-black shadow-lg flex items-center justify-center gap-2"><i data-lucide="calendar-plus" class="w-5 h-5"></i> Add Planned Off</button>
+                        </div>
+
+                        <p class="text-xs font-black uppercase text-slate-400 tracking-widest px-2 mb-3">Registered Off Days (${state.holidays.length})</p>
+                        <div class="space-y-3">
+                            ${state.holidays.sort((a,b) => b.startDate.localeCompare(a.startDate)).map(h => `
+                                <div class="bg-white p-4 rounded-3xl border border-slate-100 flex justify-between items-center shadow-sm">
+                                    <div>
+                                        <p class="font-black text-slate-800 leading-none mb-1">${h.label}</p>
+                                        <p class="text-[11px] text-slate-400 font-mono font-bold">${h.startDate} To ${h.endDate}</p>
+                                    </div>
+                                    <button onclick="deleteClassOff('${h.id}')" class="p-2 text-slate-300 hover:text-red-500 transition-colors"><i data-lucide="trash-2" class="w-5 h-5"></i></button>
+                                </div>
+                            `).join('')}
+                        </div>
+                    </div>
+                `;
+            } else if (state.view === 'leave-planner') {
+                // --- STREAMING_CHUNK: Designing Leave requests Planner with automatic validation... ---
+                container.innerHTML = `
+                    <div class="p-6">
+                        <div class="flex items-center gap-4 mb-6">
+                            <button onclick="setView('dashboard')" class="p-2 bg-emerald-50 text-emerald-700 rounded-full"><i data-lucide="arrow-left"></i></button>
+                            <h2 class="text-xl font-black text-emerald-900 leading-none">Leave Planner</h2>
+                        </div>
+
+                        <div class="bg-white p-5 rounded-[32px] border-2 border-slate-100 shadow-sm space-y-4 mb-8">
+                            <p class="text-[10px] font-black uppercase text-emerald-600 tracking-widest ml-1">Schedule Long-Term Leave</p>
+                            <select id="leave-student-id" class="w-full p-4 bg-slate-50 border border-slate-200 rounded-2xl outline-none font-bold">
+                                <option value="">-- Choose Student --</option>
+                                ${state.students.map(s => `<option value="${s.id}">Roll ${s.rollNo} - ${s.name}</option>`).join('')}
+                            </select>
+                            <div class="flex gap-2">
+                                <div class="flex-1">
+                                    <p class="text-[9px] font-black uppercase text-slate-400 mb-1 ml-2">Start Date</p>
+                                    <input id="leave-start-date" type="date" class="w-full p-4 bg-slate-50 border border-slate-200 rounded-2xl outline-none font-bold text-xs">
+                                </div>
+                                <div class="flex-1">
+                                    <p class="text-[9px] font-black uppercase text-slate-400 mb-1 ml-2">End Date</p>
+                                    <input id="leave-end-date" type="date" class="w-full p-4 bg-slate-50 border border-slate-200 rounded-2xl outline-none font-bold text-xs">
+                                </div>
+                            </div>
+                            <input id="leave-reason" type="text" class="w-full p-4 bg-slate-50 border border-slate-200 rounded-2xl outline-none" placeholder="Reason (e.g. Umrah Trip / Traveling)">
+                            <button onclick="addLeaveRequest()" class="w-full bg-emerald-600 text-white p-4 rounded-2xl font-black shadow-lg flex items-center justify-center gap-2"><i data-lucide="calendar-heart" class="w-5 h-5"></i> Schedule Leave</button>
+                        </div>
+
+                        <p class="text-xs font-black uppercase text-slate-400 tracking-widest px-2 mb-3">Active Leave Range Log (${state.leaves.length})</p>
+                        <div class="space-y-3">
+                            ${state.leaves.map(l => {
+                                const st = state.students.find(s => s.id === l.studentId);
+                                return `
+                                    <div class="bg-white p-4 rounded-3xl border border-slate-100 flex justify-between items-center shadow-sm">
+                                        <div>
+                                            <p class="font-black text-slate-800 leading-none mb-1">${st ? st.name : 'Unknown Student'}</p>
+                                            <p class="text-xs text-emerald-700 font-bold mb-2">Reason: ${l.reason}</p>
+                                            <p class="text-[10px] text-slate-400 font-mono font-bold">${l.startDate} To ${l.endDate}</p>
+                                        </div>
+                                        <button onclick="deleteLeaveRequest('${l.id}')" class="p-2 text-slate-300 hover:text-red-500 transition-colors"><i data-lucide="trash-2" class="w-5 h-5"></i></button>
+                                    </div>
+                                `;
+                            }).join('')}
+                        </div>
+                    </div>
+                `;
             } else if (state.view === 'weekly-register') {
                 const start = new Date(state.selectedWeekStart);
                 const days = [];
@@ -866,6 +1116,7 @@
                     });
                 }
 
+                // --- STREAMING_CHUNK: Constructing Weekly register overview... ---
                 container.innerHTML = `
                     <div class="p-6">
                         <div class="flex items-center justify-between mb-6">
@@ -894,12 +1145,15 @@
                                         <tr class="border-b border-slate-100">
                                             <th class="py-3 text-slate-400 font-bold text-[10px] uppercase tracking-wider w-8">Roll</th>
                                             <th class="py-3 px-2 text-slate-400 font-bold text-[10px] uppercase tracking-wider min-w-[100px]">Student</th>
-                                            ${days.map(d => `
-                                                <th class="py-3 text-center min-w-[36px]">
-                                                    <p class="text-[9px] font-black text-slate-400 uppercase leading-none">${d.dayLabel}</p>
-                                                    <p class="text-[11px] font-extrabold text-slate-700 leading-none mt-1">${d.dayNum}</p>
-                                                </th>
-                                            `).join('')}
+                                            ${days.map(d => {
+                                                const isHoliday = getActiveHoliday(d.dateStr);
+                                                return `
+                                                    <th class="py-3 text-center min-w-[36px] ${isHoliday ? 'bg-slate-50' : ''}">
+                                                        <p class="text-[9px] font-black text-slate-400 uppercase leading-none">${d.dayLabel}</p>
+                                                        <p class="text-[11px] font-extrabold text-slate-700 leading-none mt-1">${d.dayNum}</p>
+                                                    </th>
+                                                `;
+                                            }).join('')}
                                         </tr>
                                     </thead>
                                     <tbody class="divide-y divide-slate-100">
@@ -912,16 +1166,33 @@
                                                         <p class="text-[8px] text-slate-400 uppercase truncate mt-1 font-semibold">${s.fatherName}</p>
                                                     </td>
                                                     ${days.map(d => {
+                                                        const isHoliday = getActiveHoliday(d.dateStr);
                                                         const record = state.allAttendance.find(r => r.date === d.dateStr);
                                                         const status = record?.records?.[s.id] || '-';
+                                                        
                                                         let badgeClass = "text-slate-300 font-bold text-xs";
-                                                        if (status === 'P') badgeClass = "bg-green-100 text-green-700 text-[10px] font-black rounded-lg w-7 h-7 flex items-center justify-center mx-auto";
-                                                        else if (status === 'A') badgeClass = "bg-red-100 text-red-700 text-[10px] font-black rounded-lg w-7 h-7 flex items-center justify-center mx-auto";
-                                                        else if (status === 'L') badgeClass = "bg-amber-100 text-amber-700 text-[10px] font-black rounded-lg w-7 h-7 flex items-center justify-center mx-auto";
+                                                        let displayText = status;
+                                                        let titleAttr = "";
+
+                                                        if (isHoliday) {
+                                                            badgeClass = "bg-slate-100 text-slate-400 text-[10px] font-black rounded-lg w-7 h-7 flex items-center justify-center mx-auto";
+                                                            displayText = "H";
+                                                            titleAttr = `title="Holiday: ${isHoliday.label || 'Planned Off'}"`;
+                                                        } else if (status === 'P') {
+                                                            badgeClass = "bg-green-100 text-green-700 text-[10px] font-black rounded-lg w-7 h-7 flex items-center justify-center mx-auto";
+                                                        } else if (status === 'A') {
+                                                            badgeClass = "bg-red-100 text-red-700 text-[10px] font-black rounded-lg w-7 h-7 flex items-center justify-center mx-auto";
+                                                        } else if (status === 'L') {
+                                                            badgeClass = "bg-amber-100 text-amber-700 text-[10px] font-black rounded-lg w-7 h-7 flex items-center justify-center mx-auto cursor-help";
+                                                            const activeLeave = getActiveLeave(s.id, d.dateStr);
+                                                            const dailyReason = record?.reasons?.[s.id];
+                                                            const reason = dailyReason || (activeLeave ? activeLeave.reason : "");
+                                                            titleAttr = `title="Reason: ${reason || 'Not specified'}"`;
+                                                        }
                                                         
                                                         return `
-                                                            <td class="py-2.5 text-center">
-                                                                <span class="${badgeClass}">${status}</span>
+                                                            <td class="py-2.5 text-center ${isHoliday ? 'bg-slate-50/50' : ''}">
+                                                                <span class="${badgeClass}" ${titleAttr}>${displayText}</span>
                                                             </td>
                                                         `;
                                                     }).join('')}
@@ -936,6 +1207,7 @@
                 `;
             } else if (state.view === 'contact-log') {
                 const filteredStudents = state.students.filter(s => s.name.toLowerCase().includes(state.searchQuery) || s.rollNo.includes(state.searchQuery));
+                // --- STREAMING_CHUNK: Laying out contact support registry panel... ---
                 container.innerHTML = `
                     <div class="p-6">
                         <div class="flex items-center gap-4 mb-6">
@@ -976,6 +1248,9 @@
                 `;
             } else if (state.view === 'mark-attendance') {
                 const filteredStudents = state.students.filter(s => s.name.toLowerCase().includes(state.searchQuery) || s.rollNo.includes(state.searchQuery));
+                const activeHoliday = getActiveHoliday(state.selectedDate);
+
+                // --- STREAMING_CHUNK: Processing Attendance mark sheet rendering logic... ---
                 container.innerHTML = `
                     <div class="p-6 pb-32">
                         <div class="flex items-center justify-between mb-4">
@@ -985,9 +1260,21 @@
                             </div>
                             <input type="date" value="${state.selectedDate}" onchange="updateDate(this.value)" class="p-2 bg-emerald-50 border-0 rounded-xl text-xs font-black text-emerald-700 outline-none">
                         </div>
+
+                        ${activeHoliday ? `
+                            <!-- Holiday Banner Warning -->
+                            <div class="bg-amber-50 border border-amber-200 rounded-2xl p-4 mb-4 flex gap-3 items-start">
+                                <i data-lucide="info" class="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5"></i>
+                                <div>
+                                    <p class="font-extrabold text-xs text-amber-900 leading-tight">Class Holiday Active</p>
+                                    <p class="text-[11px] text-amber-700 mt-1">This day is registered as: <span class="font-bold">"${activeHoliday.label}"</span>. Student percentage score won't be calculated against this day.</p>
+                                </div>
+                            </div>
+                        ` : ''}
+
                         <div class="mb-4 relative">
                             <i data-lucide="search" class="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400"></i>
-                            <input type="text" oninput="handleSearch(event)" value="${state.searchQuery}" class="w-full pl-11 pr-4 py-3 bg-white border border-slate-200 rounded-2xl outline-none text-sm font-medium" placeholder="Quick Search...">
+                            <input type="text" oninput="handleSearch(event)" value="${state.searchQuery}" class="w-full pl-11 pr-4 py-3 bg-white border border-slate-200 rounded-2xl outline-none focus:ring-2 focus:ring-emerald-500 text-sm font-medium" placeholder="Quick Search...">
                         </div>
                         
                         <!-- EQUAL THREE WAY BULK ACTION ROW -->
@@ -998,19 +1285,41 @@
                         </div>
 
                         <div class="space-y-3">
-                            ${filteredStudents.map(s => `
-                                <div class="bg-white p-3 pr-2 rounded-[28px] border border-slate-100 shadow-sm flex justify-between items-center transition-all">
-                                    <div class="flex-1 min-w-0 flex items-center gap-3">
-                                        <div class="text-[11px] font-black text-slate-300 w-6 flex-shrink-0 text-center">${s.rollNo}</div>
-                                        <div class="truncate"><p class="font-bold text-slate-800 text-md truncate leading-tight">${s.name}</p><p class="text-[9px] text-slate-400 font-bold uppercase truncate tracking-tight">${s.fatherName}</p></div>
+                            ${filteredStudents.map(s => {
+                                const activeStudentLeave = getActiveLeave(s.id, state.selectedDate);
+                                return `
+                                <div class="bg-white p-3 pr-2 rounded-[28px] border border-slate-100 shadow-sm flex flex-col gap-2 transition-all">
+                                    <div class="flex justify-between items-center">
+                                        <div class="flex-1 min-w-0 flex items-center gap-3">
+                                            <div class="text-[11px] font-black text-slate-300 w-6 flex-shrink-0 text-center">${s.rollNo}</div>
+                                            <div class="truncate">
+                                                <p class="font-bold text-slate-800 text-md truncate leading-tight">${s.name}</p>
+                                                <p class="text-[9px] text-slate-400 font-bold uppercase truncate tracking-tight">${s.fatherName}</p>
+                                            </div>
+                                        </div>
+                                        <div class="flex gap-1">
+                                            ${['P', 'A', 'L'].map(st => `
+                                                <button onclick="setStatus('${s.id}', '${st}')" class="w-11 h-11 rounded-2xl font-black text-xs transition-all tap-highlight-none ${state.currentDayAttendance[s.id] === st ? (st === 'P' ? 'bg-emerald-500 text-white shadow-lg scale-105' : st === 'A' ? 'bg-red-500 text-white shadow-lg scale-105' : 'bg-amber-500 text-white shadow-lg scale-105') : 'bg-slate-50 text-slate-300'}">${st}</button>
+                                            `).join('')}
+                                        </div>
                                     </div>
-                                    <div class="flex gap-1">
-                                        ${['P', 'A', 'L'].map(st => `
-                                            <button onclick="setStatus('${s.id}', '${st}')" class="w-11 h-11 rounded-2xl font-black text-xs transition-all tap-highlight-none ${state.currentDayAttendance[s.id] === st ? (st === 'P' ? 'bg-emerald-500 text-white shadow-lg scale-105' : st === 'A' ? 'bg-red-500 text-white shadow-lg scale-105' : 'bg-amber-500 text-white shadow-lg scale-105') : 'bg-slate-50 text-slate-300'}">${st}</button>
-                                        `).join('')}
-                                    </div>
+
+                                    ${activeStudentLeave ? `
+                                        <div class="bg-emerald-50 text-emerald-800 text-[10px] font-extrabold px-3 py-1.5 rounded-xl border border-emerald-100 flex items-center gap-2">
+                                            <i data-lucide="calendar-heart" class="w-3.5 h-3.5 flex-shrink-0"></i>
+                                            Scheduled range leave: "${activeStudentLeave.reason}"
+                                        </div>
+                                    ` : ''}
+
+                                    <!-- Inline Leave Reason Input box if marked 'L' -->
+                                    ${state.currentDayAttendance[s.id] === 'L' ? `
+                                        <div class="px-2 pb-1">
+                                            <input type="text" placeholder="Why leave? (e.g. Fever, Out of city)" oninput="updateLeaveReason('${s.id}', this.value)" value="${state.currentDayReasons[s.id] || ''}" class="w-full text-xs p-2.5 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:ring-1 focus:ring-amber-500 font-semibold text-amber-950">
+                                        </div>
+                                    ` : ''}
                                 </div>
-                            `).join('')}
+                            `;
+                            }).join('')}
                         </div>
                         <div class="fixed bottom-0 left-0 right-0 max-w-lg mx-auto p-4 bg-white/95 backdrop-blur-md border-t border-slate-100 z-40">
                             <button onclick="saveAttendance()" class="w-full bg-emerald-600 text-white py-4 rounded-3xl font-black text-lg shadow-xl active:scale-95 transition-all">COMMIT ATTENDANCE</button>
@@ -1020,13 +1329,42 @@
             } else if (state.view === 'reports') {
                 const statsMap = {};
                 state.students.forEach(s => statsMap[s.id] = { roll: s.rollNo, name: s.name, P:0, A:0, L:0, total:0 });
-                const filteredAtt = state.allAttendance.filter(day => day.date.startsWith(state.selectedReportMonth));
+                
+                // Exclude holidays from the active attendance logs denominator
+                const filteredAtt = state.allAttendance.filter(day => {
+                    const isReportMonth = day.date.startsWith(state.selectedReportMonth);
+                    const isHoliday = getActiveHoliday(day.date);
+                    return isReportMonth && !isHoliday; // Skip planned off dates!
+                });
+
                 filteredAtt.forEach(day => {
                     Object.entries(day.records || {}).forEach(([sid, status]) => {
                         if (statsMap[sid]) { statsMap[sid][status]++; statsMap[sid].total++; }
                     });
                 });
                 const reportData = Object.values(statsMap);
+
+                // Compile all daily leave reasons written this month
+                const monthlyReasonsList = [];
+                filteredAtt.forEach(day => {
+                    if (day.reasons) {
+                        Object.entries(day.reasons).forEach(([sid, reason]) => {
+                            if (reason && reason.trim() !== '') {
+                                const student = state.students.find(s => s.id === sid);
+                                if (student) {
+                                    monthlyReasonsList.push({
+                                        date: day.date,
+                                        roll: student.rollNo,
+                                        name: student.name,
+                                        reason: reason
+                                    });
+                                }
+                            }
+                        });
+                    }
+                });
+
+                // --- STREAMING_CHUNK: Compiling reports statistics... ---
                 container.innerHTML = `
                     <div class="p-6 pb-24">
                         <div class="flex items-center justify-between mb-6">
@@ -1059,6 +1397,28 @@
                                     }).join('')}
                                 </tbody>
                             </table>
+                        </div>
+
+                        <!-- MONTHLY LEAVE REASONS FEED -->
+                        <div class="mt-6 bg-white p-5 rounded-[32px] border border-slate-100 shadow-xl">
+                            <h3 class="text-xs font-black text-slate-800 uppercase tracking-widest mb-4 flex items-center gap-2">
+                                <i data-lucide="book-open" class="w-4 h-4 text-amber-500"></i> Month's Leave Explanations
+                            </h3>
+                            ${monthlyReasonsList.length > 0 ? `
+                                <div class="space-y-3 max-h-64 overflow-y-auto pr-1">
+                                    ${monthlyReasonsList.sort((a,b) => b.date.localeCompare(a.date)).map(item => `
+                                        <div class="flex justify-between items-center bg-slate-50 p-3 rounded-xl border border-slate-100">
+                                            <div>
+                                                <p class="font-extrabold text-xs text-slate-700">${item.name} <span class="text-[10px] text-slate-400">(${item.roll})</span></p>
+                                                <p class="text-[11px] text-slate-500 mt-1">Reason: <span class="font-bold text-amber-700">${item.reason}</span></p>
+                                            </div>
+                                            <span class="text-[10px] font-bold text-slate-400 bg-slate-200 px-2 py-0.5 rounded-md">${item.date}</span>
+                                        </div>
+                                    `).join('')}
+                                </div>
+                            ` : `
+                                <p class="text-center py-4 text-xs text-slate-400 font-medium">No leave explanations logged this month.</p>
+                            `}
                         </div>
                     </div>
                 `;
