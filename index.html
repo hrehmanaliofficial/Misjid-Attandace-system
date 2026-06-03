@@ -100,7 +100,7 @@
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, collection, doc, setDoc, getDoc, onSnapshot, addDoc, deleteDoc, updateDoc, enableNetwork } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getFirestore, collection, doc, setDoc, getDoc, onSnapshot, addDoc, deleteDoc, updateDoc, enableNetwork, enableIndexedDbPersistence } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         // --- OFFICIAL FIREBASE CONFIG ---
         const firebaseConfig = {
@@ -117,6 +117,17 @@
         const db = getFirestore(app);
         const appId = 'masjid-attendance-76cd1-v1';
 
+        // Enable Offline Support (IndexedDB Local Cache)
+        enableIndexedDbPersistence(db).catch((err) => {
+            if (err.code === 'failed-precondition') {
+                // Raised when multiple tabs of the app are open simultaneously
+                console.warn("Multiple tabs open; offline persistence is active in only one tab.");
+            } else if (err.code === 'unimplemented') {
+                // Raised when browser does not support IndexedDB
+                console.warn("The current browser does not support offline data persistence.");
+            }
+        });
+
         // Helper to get current week's Monday
         function getMonday(d) {
             d = new Date(d);
@@ -132,8 +143,6 @@
             view: 'login',
             students: [],
             allAttendance: [],
-            holidays: [], // Custom planned offs
-            leaves: [],    // Custom range leaves
             selectedDate: new Date().toISOString().split('T')[0],
             selectedReportMonth: new Date().toISOString().slice(0, 7),
             selectedWeekStart: getMonday(new Date()).toISOString().split('T')[0],
