@@ -36,7 +36,7 @@
         
         <!-- Connectivity Status Bar -->
         <div id="status-bar" class="bg-slate-900 text-[10px] text-white px-4 py-1 flex justify-between items-center z-50">
-            <span class="font-bold opacity-70 uppercase tracking-widest">Hafiz Rehman Ali's Class</span>
+            <span id="top-bar-title" class="font-bold opacity-70 uppercase tracking-widest">Faiza Masjid Portal</span>
             <div id="network-status" class="flex items-center gap-1.5">
                 <span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
                 <span class="font-black uppercase tracking-tighter">Online</span>
@@ -120,10 +120,8 @@
         // Enable Offline Support (IndexedDB Local Cache)
         enableIndexedDbPersistence(db).catch((err) => {
             if (err.code === 'failed-precondition') {
-                // Raised when multiple tabs of the app are open simultaneously
                 console.warn("Multiple tabs open; offline persistence is active in only one tab.");
             } else if (err.code === 'unimplemented') {
-                // Raised when browser does not support IndexedDB
                 console.warn("The current browser does not support offline data persistence.");
             }
         });
@@ -136,23 +134,57 @@
             return new Date(d.setDate(diff));
         }
 
+        // Teacher Workspace Mapping
+        // Hafiz Rehman Ali maps directly to the original collections so existing data is 100% preserved
+        const TEACHERS = {
+            'hafiz rehman ali': {
+                id: 'rehman',
+                name: 'Hafiz Rehman Ali',
+                title: "Hafiz Rehman Ali's Class",
+                passwords: ['4248'],
+                collections: {
+                    students: 'students',
+                    attendance: 'attendance',
+                    holidays: 'holidays',
+                    leaves: 'leaves'
+                }
+            },
+            'hafiz ahmad': {
+                id: 'ahmad',
+                name: 'Hafiz Ahmad',
+                title: "Hafiz Ahmad's Class",
+                passwords: ['1234', '7860'], // Default PIN: 1234
+                collections: {
+                    students: 'students_ahmad',
+                    attendance: 'attendance_ahmad',
+                    holidays: 'holidays_ahmad',
+                    leaves: 'leaves_ahmad'
+                }
+            }
+        };
+
         // --- STATE ---
         let state = {
             user: null,
             isLoggedIntoApp: false,
+            currentTeacher: null,
             view: 'login',
             students: [],
             allAttendance: [],
+            holidays: [],
+            leaves: [],
             selectedDate: new Date().toISOString().split('T')[0],
             selectedReportMonth: new Date().toISOString().slice(0, 7),
             selectedWeekStart: getMonday(new Date()).toISOString().split('T')[0],
             currentDayAttendance: {},
-            currentDayReasons: {}, // Stored daily leave reasons
+            currentDayReasons: {},
             searchQuery: '',
             editingStudent: null
         };
 
-        // --- STREAMING_CHUNK: Loading authentications and network bindings... ---
+        // Active Firestore unsubscription handlers
+        let unsubs = [];
+
         const initAuth = async (retries = 5) => {
             const delay = (ms) => new Promise(res => setTimeout(res, ms));
             for (let i = 0; i < retries; i++) {
@@ -177,7 +209,6 @@
                     await enableNetwork(db);
                     document.getElementById('loading-overlay').classList.add('hidden');
                     document.getElementById('main-content').classList.remove('hidden');
-                    startListeners();
                     render();
                 } catch (e) { console.error(e); }
             }
@@ -198,44 +229,55 @@
         window.addEventListener('online', () => updateNetworkStatus(true));
         window.addEventListener('offline', () => updateNetworkStatus(false));
 
-        // --- STREAMING_CHUNK: Initializing snapshot listeners for Students, Attendance, Holidays, and Leaves... ---
+        function stopListeners() {
+            unsubs.forEach(unsub => {
+                if (typeof unsub === 'function') unsub();
+            });
+            unsubs = [];
+        }
+
         function startListeners() {
-            if (!state.user) return;
-            onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'students'), (snap) => {
+            stopListeners();
+            if (!state.user || !state.currentTeacher) return;
+
+            const cols = state.currentTeacher.collections;
+
+            const unsubStudents = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', cols.students), (snap) => {
                 state.students = snap.docs.map(d => ({ id: d.id, ...d.data() }))
                     .sort((a, b) => (parseInt(a.rollNo) || 0) - (parseInt(b.rollNo) || 0));
                 render();
             });
 
-            onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'attendance'), (snap) => {
+            const unsubAtt = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', cols.attendance), (snap) => {
                 state.allAttendance = snap.docs.map(d => ({ date: d.id, ...d.data() }));
                 render();
             });
 
-            onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'holidays'), (snap) => {
+            const unsubHolidays = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', cols.holidays), (snap) => {
                 state.holidays = snap.docs.map(d => ({ id: d.id, ...d.data() }));
                 render();
             });
 
-            onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'leaves'), (snap) => {
+            const unsubLeaves = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', cols.leaves), (snap) => {
                 state.leaves = snap.docs.map(d => ({ id: d.id, ...d.data() }));
                 render();
             });
+
+            unsubs = [unsubStudents, unsubAtt, unsubHolidays, unsubLeaves];
         }
 
-        // Helper to evaluate active range leaves for a student on a specific date
         function getActiveLeave(studentId, dateStr) {
-            return state.leaves.find(l => l.studentId === studentId && dateStr >= l.startDate && dateStr <= l.endDate);
+            return (state.leaves || []).find(l => l.studentId === studentId && dateStr >= l.startDate && dateStr <= l.endDate);
         }
 
-        // Helper to evaluate range-based planned offs / holidays
         function getActiveHoliday(dateStr) {
-            return state.holidays.find(h => dateStr >= h.startDate && dateStr <= h.endDate);
+            return (state.holidays || []).find(h => dateStr >= h.startDate && dateStr <= h.endDate);
         }
 
         async function fetchDayAttendance(date) {
-            if (!state.user) return;
-            const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'attendance', date);
+            if (!state.user || !state.currentTeacher) return;
+            const cols = state.currentTeacher.collections;
+            const docRef = doc(db, 'artifacts', appId, 'public', 'data', cols.attendance, date);
             try {
                 const snap = await getDoc(docRef);
                 if (snap.exists()) {
@@ -243,7 +285,6 @@
                     state.currentDayAttendance = data.records || {};
                     state.currentDayReasons = data.reasons || {};
                     
-                    // Auto override to L if student is on a scheduled range leave, or initialize new students
                     state.students.forEach(s => {
                         const activeLeave = getActiveLeave(s.id, date);
                         if (activeLeave) {
@@ -274,19 +315,48 @@
             render();
         }
 
-        // --- STREAMING_CHUNK: Defining router & basic authentication logic... ---
         window.handleLogin = (e) => {
             if (e) e.preventDefault();
             const userIn = document.getElementById('login-user').value.toLowerCase().trim();
             const passIn = document.getElementById('login-pass').value.trim();
-            if (userIn === "hafiz rehman ali" && passIn === "4248") {
+
+            const teacher = TEACHERS[userIn];
+            if (teacher && teacher.passwords.includes(passIn)) {
+                state.currentTeacher = teacher;
                 state.isLoggedIntoApp = true;
                 state.view = 'dashboard';
+
+                // Update status bar title dynamically
+                const topTitle = document.getElementById('top-bar-title');
+                if (topTitle) topTitle.innerText = teacher.title;
+
+                startListeners();
+                fetchDayAttendance(state.selectedDate);
                 render();
-                showToast("Assalamu Alaikum", "check-circle");
+                showToast(`Assalamu Alaikum, ${teacher.name}`, "check-circle");
             } else {
-                showToast("Login Denied", "shield-alert");
+                showToast("Invalid Username or Password", "shield-alert");
             }
+        };
+
+        window.handleLogout = () => {
+            stopListeners();
+            state.isLoggedIntoApp = false;
+            state.currentTeacher = null;
+            state.students = [];
+            state.allAttendance = [];
+            state.holidays = [];
+            state.leaves = [];
+            state.currentDayAttendance = {};
+            state.currentDayReasons = {};
+            state.editingStudent = null;
+            state.view = 'login';
+
+            const topTitle = document.getElementById('top-bar-title');
+            if (topTitle) topTitle.innerText = "Faiza Masjid Portal";
+
+            render();
+            showToast("Logged Out", "power");
         };
 
         window.setView = (viewName) => {
@@ -305,8 +375,9 @@
             render();
         };
 
-        // --- STREAMING_CHUNK: Handling enrollment and record writing controllers... ---
         window.addStudent = async () => {
+            if (!state.currentTeacher) return;
+            const cols = state.currentTeacher.collections;
             const name = document.getElementById('new-student-name').value.trim();
             const father = document.getElementById('new-student-father').value.trim();
             const rollNo = document.getElementById('new-student-roll').value.trim();
@@ -315,7 +386,7 @@
 
             if (!name || !rollNo || !father) return showToast("Required: Roll#, Name & Father Name", "alert-circle");
             try {
-                await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'students'), {
+                await addDoc(collection(db, 'artifacts', appId, 'public', 'data', cols.students), {
                     name, 
                     fatherName: father, 
                     rollNo, 
@@ -323,7 +394,7 @@
                     contactRelation: relation || 'Father',
                     createdAt: new Date().toISOString()
                 });
-                showToast("Registered", "user-plus");
+                showToast("Student Registered", "user-plus");
                 document.getElementById('new-student-name').value = '';
                 document.getElementById('new-student-father').value = '';
                 document.getElementById('new-student-contact').value = '';
@@ -341,6 +412,8 @@
         };
 
         window.saveEdit = async () => {
+            if (!state.currentTeacher || !state.editingStudent) return;
+            const cols = state.currentTeacher.collections;
             const name = document.getElementById('edit-student-name').value.trim();
             const father = document.getElementById('edit-student-father').value.trim();
             const rollNo = document.getElementById('edit-student-roll').value.trim();
@@ -349,7 +422,7 @@
 
             if (!name || !rollNo || !father) return showToast("Required: Roll#, Name & Father Name", "alert-circle");
             try {
-                const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'students', state.editingStudent.id);
+                const docRef = doc(db, 'artifacts', appId, 'public', 'data', cols.students, state.editingStudent.id);
                 await updateDoc(docRef, { 
                     name, 
                     fatherName: father, 
@@ -358,7 +431,7 @@
                     contactRelation: relation || 'Father' 
                 });
                 state.editingStudent = null;
-                showToast("Updated", "check-circle");
+                showToast("Record Updated", "check-circle");
                 render();
             } catch (e) { showToast("Save failed"); }
         };
@@ -369,21 +442,24 @@
         };
 
         window.deleteStudent = async (id) => {
-            if(confirm("Remove this student?")) {
-                await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'students', id));
-                showToast("Removed", "trash-2");
+            if (!state.currentTeacher) return;
+            const cols = state.currentTeacher.collections;
+            if (window.confirm("Remove this student?")) {
+                await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', cols.students, id));
+                showToast("Student Removed", "trash-2");
             }
         };
 
-        // --- STREAMING_CHUNK: Implementing planned class-offs & Range leave planners... ---
         window.addClassOff = async () => {
+            if (!state.currentTeacher) return;
+            const cols = state.currentTeacher.collections;
             const start = document.getElementById('holiday-start-date').value;
             const end = document.getElementById('holiday-end-date').value;
             const label = document.getElementById('holiday-label').value.trim();
             if (!start || !end || !label) return showToast("Required: Start Date, End Date, and Label", "alert-circle");
 
             try {
-                await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'holidays'), {
+                await addDoc(collection(db, 'artifacts', appId, 'public', 'data', cols.holidays), {
                     startDate: start,
                     endDate: end,
                     label: label
@@ -394,13 +470,17 @@
         };
 
         window.deleteClassOff = async (id) => {
-            if (confirm("Cancel this planned off?")) {
-                await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'holidays', id));
+            if (!state.currentTeacher) return;
+            const cols = state.currentTeacher.collections;
+            if (window.confirm("Cancel this planned off?")) {
+                await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', cols.holidays, id));
                 showToast("Planned Off Removed", "trash-2");
             }
         };
 
         window.addLeaveRequest = async () => {
+            if (!state.currentTeacher) return;
+            const cols = state.currentTeacher.collections;
             const sid = document.getElementById('leave-student-id').value;
             const start = document.getElementById('leave-start-date').value;
             const end = document.getElementById('leave-end-date').value;
@@ -408,7 +488,7 @@
 
             if (!sid || !start || !end || !reason) return showToast("Please fill all leave planner fields", "alert-circle");
             try {
-                await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'leaves'), {
+                await addDoc(collection(db, 'artifacts', appId, 'public', 'data', cols.leaves), {
                     studentId: sid,
                     startDate: start,
                     endDate: end,
@@ -420,8 +500,10 @@
         };
 
         window.deleteLeaveRequest = async (id) => {
-            if (confirm("Remove this leave record?")) {
-                await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'leaves', id));
+            if (!state.currentTeacher) return;
+            const cols = state.currentTeacher.collections;
+            if (window.confirm("Remove this leave record?")) {
+                await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', cols.leaves, id));
                 showToast("Leave Record Deleted", "trash-2");
             }
         };
@@ -469,8 +551,10 @@
         };
 
         window.saveAttendance = async () => {
+            if (!state.currentTeacher) return;
+            const cols = state.currentTeacher.collections;
             try {
-                await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'attendance', state.selectedDate), {
+                await setDoc(doc(db, 'artifacts', appId, 'public', 'data', cols.attendance, state.selectedDate), {
                     date: state.selectedDate,
                     records: state.currentDayAttendance,
                     reasons: state.currentDayReasons || {}
@@ -504,8 +588,9 @@
             }, 300);
         };
 
-        // --- STREAMING_CHUNK: Designing professional ExcelJS export with high-contrast holiday rendering... ---
         window.downloadExcelReport = async () => {
+            if (!state.currentTeacher) return;
+            const teacher = state.currentTeacher;
             try {
                 const [year, month] = state.selectedReportMonth.split('-').map(Number);
                 const daysInMonth = new Date(year, month, 0).getDate();
@@ -536,7 +621,7 @@
 
                 wsRegister.mergeCells(2, 1, 2, colPctIdx);
                 const subCell = wsRegister.getCell('A2');
-                subCell.value = "Class Teacher: Hafiz Rehman Ali";
+                subCell.value = `Class Teacher: ${teacher.name}`;
                 subCell.font = { name: 'Inter', bold: true, size: 10, color: { argb: 'FFD1FAE5' } };
                 subCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF065F46' } };
                 subCell.alignment = { horizontal: 'center', vertical: 'middle' };
@@ -563,7 +648,6 @@
                     cell.border = (d === daysInMonth) ? doubleDividerBorder : standardBorder;
                     cell.alignment = { horizontal: 'center', vertical: 'middle' };
                     
-                    // If this date is a holiday, shade header gray
                     const dateStr = `${state.selectedReportMonth}-${String(d).padStart(2, '0')}`;
                     if (getActiveHoliday(dateStr)) {
                         cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE2E8F0' } };
@@ -597,7 +681,6 @@
 
                 headerRow.font = { name: 'Inter', bold: true, size: 10, color: { argb: 'FF1E293B' } };
 
-                // Build student register rows
                 state.students.forEach((s, sIdx) => {
                     const rNum = 5 + sIdx;
                     const row = wsRegister.getRow(rNum);
@@ -702,7 +785,7 @@
 
                 wsDirectory.mergeCells(2, 1, 2, 5);
                 const dSub = wsDirectory.getCell('A2');
-                dSub.value = "Hafiz Rehman Ali's Class Communication Link";
+                dSub.value = `${teacher.title} Communication Link`;
                 dSub.font = { name: 'Inter', bold: true, size: 10, color: { argb: 'FFF1F5F9' } };
                 dSub.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF334155' } };
                 dSub.alignment = { horizontal: 'center', vertical: 'middle' };
@@ -765,7 +848,7 @@
                 const rTitle = wsReasons.getCell('A1');
                 rTitle.value = "RECORDED LEAVE EXPLANATIONS";
                 rTitle.font = { name: 'Inter', bold: true, size: 14, color: { argb: 'FFFFFFFF' } };
-                rTitle.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD97706' } }; // Amber Header
+                rTitle.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD97706' } };
                 rTitle.alignment = { horizontal: 'center', vertical: 'middle' };
                 wsReasons.getRow(1).height = 40;
 
@@ -818,7 +901,8 @@
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement("a");
                 a.href = url;
-                a.download = `Hafiz_Rehman_Register_${state.selectedReportMonth}.xlsx`;
+                const safeName = teacher.name.replace(/\s+/g, '_');
+                a.download = `${safeName}_Register_${state.selectedReportMonth}.xlsx`;
                 a.click();
                 showToast("Register Exported Successfully!", "file-spreadsheet");
             } catch (error) {
@@ -828,11 +912,20 @@
         };
 
         window.downloadBackup = () => {
-            const data = { students: state.students, attendance: state.allAttendance, holidays: state.holidays, leaves: state.leaves };
+            if (!state.currentTeacher) return;
+            const data = { 
+                teacher: state.currentTeacher.name,
+                students: state.students, 
+                attendance: state.allAttendance, 
+                holidays: state.holidays, 
+                leaves: state.leaves 
+            };
             const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
-            a.href = url; a.download = `masjid_database_backup.json`; a.click();
+            a.href = url; 
+            a.download = `${state.currentTeacher.id}_masjid_database_backup.json`; 
+            a.click();
         };
 
         function showToast(msg, icon = "info") {
@@ -850,37 +943,55 @@
             }, 3000);
         }
 
-        // --- STREAMING_CHUNK: Starting user interface rendering engine... ---
         function render() {
             const container = document.getElementById('view-container');
             if (!container) return;
 
             if (state.view === 'login') {
                 container.innerHTML = `
-                    <div class="h-full flex flex-col items-center justify-center p-8 bg-emerald-700 text-white min-h-screen">
-                        <div class="w-24 h-24 bg-white/20 backdrop-blur-md rounded-[32px] flex items-center justify-center mb-8 shadow-2xl border border-white/10">
+                    <div class="h-full flex flex-col items-center justify-center p-8 bg-emerald-700 text-white min-h-screen relative overflow-hidden">
+                        <!-- Decorative ambient backdrop blur -->
+                        <div class="absolute -top-16 -right-16 w-48 h-48 bg-white/10 rounded-full blur-3xl pointer-events-none"></div>
+                        <div class="absolute -bottom-16 -left-16 w-48 h-48 bg-emerald-900/30 rounded-full blur-3xl pointer-events-none"></div>
+
+                        <div class="w-24 h-24 bg-white/20 backdrop-blur-md rounded-[32px] flex items-center justify-center mb-6 shadow-2xl border border-white/15">
                             <i data-lucide="shield-lock" class="w-12 h-12 text-white"></i>
                         </div>
-                        <h1 class="text-3xl font-black mb-1 text-center tracking-tight leading-none">Madrasa Portal</h1>
-                        <p class="text-emerald-100 opacity-90 mb-12 text-center font-medium">Hafiz Rehman Ali's Class</p>
+                        <h1 class="text-3xl font-black mb-1.5 text-center tracking-tight leading-none">Faiza Masjid</h1>
+                        <p class="text-emerald-100 opacity-90 mb-8 text-center font-semibold text-xs tracking-wider uppercase">Teacher Attendance Gateway</p>
                         
                         <form onsubmit="handleLogin(event)" class="w-full max-w-xs space-y-4">
-                            <input id="login-user" type="text" placeholder="Username" class="w-full p-4 bg-white/10 border border-white/20 rounded-2xl outline-none focus:bg-white/20 transition-all font-bold placeholder:text-white/30">
-                            <input id="login-pass" type="password" placeholder="Password" class="w-full p-4 bg-white/10 border border-white/20 rounded-2xl outline-none focus:bg-white/20 transition-all font-bold placeholder:text-white/30">
-                            <button type="submit" class="w-full bg-white text-emerald-800 py-4 rounded-2xl font-black text-lg shadow-xl active:scale-95 transition-all">Unlock Dashboard</button>
+                            <div>
+                                <label class="text-[10px] font-bold uppercase tracking-widest text-emerald-200 block mb-1">Teacher Username</label>
+                                <input id="login-user" type="text" placeholder="hafiz rehman ali / hafiz ahmad" class="w-full p-4 bg-white/10 border border-white/20 rounded-2xl outline-none focus:bg-white/20 transition-all font-bold placeholder:text-white/30 text-sm">
+                            </div>
+                            <div>
+                                <label class="text-[10px] font-bold uppercase tracking-widest text-emerald-200 block mb-1">Access PIN</label>
+                                <input id="login-pass" type="password" placeholder="PIN" class="w-full p-4 bg-white/10 border border-white/20 rounded-2xl outline-none focus:bg-white/20 transition-all font-bold placeholder:text-white/30 text-sm">
+                            </div>
+                            <button type="submit" class="w-full bg-white text-emerald-800 py-4 rounded-2xl font-black text-lg shadow-xl active:scale-95 transition-all mt-2">Open Class Workspace</button>
                         </form>
+
+                        <!-- Creator Signature Badge -->
+                        <div class="mt-10 pt-6 border-t border-white/15 w-full max-w-xs text-center flex flex-col items-center">
+                            <span class="text-[9px] uppercase font-bold tracking-[0.25em] text-emerald-200/80 mb-1.5">System Designed & Created By</span>
+                            <div class="inline-flex items-center gap-2 bg-white/10 backdrop-blur-sm px-4 py-2 rounded-full border border-white/20 shadow-lg">
+                                <i data-lucide="sparkles" class="w-3.5 h-3.5 text-amber-300"></i>
+                                <span class="font-extrabold text-xs tracking-wide text-white">Hafiz Rehman Ali</span>
+                            </div>
+                        </div>
                     </div>
                 `;
             } else if (state.view === 'dashboard') {
-                // --- STREAMING_CHUNK: Rendering Dashboard view layout... ---
+                const teacher = state.currentTeacher;
                 container.innerHTML = `
                     <div class="p-6">
                         <header class="flex justify-between items-start mb-8">
                             <div>
                                 <h1 class="text-2xl font-black text-emerald-900 leading-tight tracking-tight">Assalamu Alaikum</h1>
-                                <p class="text-slate-400 font-bold uppercase text-[9px] tracking-[0.2em]">Hafiz Rehman Ali's Class</p>
+                                <p class="text-slate-400 font-bold uppercase text-[9px] tracking-[0.2em]">${teacher ? teacher.title : "Teacher's Class"}</p>
                             </div>
-                            <button onclick="state.isLoggedIntoApp=false; setView('login')" class="p-2.5 text-slate-300 hover:text-red-500 transition-colors bg-slate-50 rounded-xl"><i data-lucide="power" class="w-5 h-5"></i></button>
+                            <button onclick="handleLogout()" title="Logout" class="p-2.5 text-slate-400 hover:text-red-500 transition-colors bg-slate-50 rounded-xl"><i data-lucide="power" class="w-5 h-5"></i></button>
                         </header>
 
                         <div class="grid grid-cols-2 gap-4 mb-8">
@@ -921,7 +1032,7 @@
                         <div class="bg-slate-900 text-white p-6 rounded-[36px] shadow-2xl relative overflow-hidden">
                             <div class="absolute -right-4 -top-4 w-24 h-24 bg-emerald-500/10 rounded-full blur-3xl"></div>
                             <div class="flex justify-between items-center mb-6">
-                                <h3 class="text-xs font-black text-emerald-400 uppercase tracking-widest">Database Stats</h3>
+                                <h3 class="text-xs font-black text-emerald-400 uppercase tracking-widest">${teacher ? teacher.name : "Teacher"} - Stats</h3>
                                 <div class="px-2.5 py-1 bg-emerald-500/10 text-emerald-400 text-[10px] font-black rounded-full border border-emerald-500/20">LIVE SYNC</div>
                             </div>
                             <div class="grid grid-cols-3 gap-2 text-center">
@@ -937,7 +1048,6 @@
                 const lastRoll = state.students.length > 0 ? Math.max(...state.students.map(s => parseInt(s.rollNo) || 0)) : 0;
                 const nextRoll = lastRoll + 1;
 
-                // --- STREAMING_CHUNK: Rendering Enrollment view with smooth-scrolling forms... ---
                 container.innerHTML = `
                     <div class="p-6">
                         <div class="flex items-center gap-4 mb-6">
@@ -1027,7 +1137,6 @@
                     </div>
                 `;
             } else if (state.view === 'class-holidays') {
-                // --- STREAMING_CHUNK: Building Holiday registry view... ---
                 container.innerHTML = `
                     <div class="p-6">
                         <div class="flex items-center gap-4 mb-6">
@@ -1066,7 +1175,6 @@
                     </div>
                 `;
             } else if (state.view === 'leave-planner') {
-                // --- STREAMING_CHUNK: Designing Leave requests Planner with automatic validation... ---
                 container.innerHTML = `
                     <div class="p-6">
                         <div class="flex items-center gap-4 mb-6">
@@ -1125,7 +1233,6 @@
                     });
                 }
 
-                // --- STREAMING_CHUNK: Constructing Weekly register overview... ---
                 container.innerHTML = `
                     <div class="p-6">
                         <div class="flex items-center justify-between mb-6">
@@ -1216,7 +1323,6 @@
                 `;
             } else if (state.view === 'contact-log') {
                 const filteredStudents = state.students.filter(s => s.name.toLowerCase().includes(state.searchQuery) || s.rollNo.includes(state.searchQuery));
-                // --- STREAMING_CHUNK: Laying out contact support registry panel... ---
                 container.innerHTML = `
                     <div class="p-6">
                         <div class="flex items-center gap-4 mb-6">
@@ -1259,7 +1365,6 @@
                 const filteredStudents = state.students.filter(s => s.name.toLowerCase().includes(state.searchQuery) || s.rollNo.includes(state.searchQuery));
                 const activeHoliday = getActiveHoliday(state.selectedDate);
 
-                // --- STREAMING_CHUNK: Processing Attendance mark sheet rendering logic... ---
                 container.innerHTML = `
                     <div class="p-6 pb-32">
                         <div class="flex items-center justify-between mb-4">
@@ -1271,7 +1376,6 @@
                         </div>
 
                         ${activeHoliday ? `
-                            <!-- Holiday Banner Warning -->
                             <div class="bg-amber-50 border border-amber-200 rounded-2xl p-4 mb-4 flex gap-3 items-start">
                                 <i data-lucide="info" class="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5"></i>
                                 <div>
@@ -1286,7 +1390,6 @@
                             <input type="text" oninput="handleSearch(event)" value="${state.searchQuery}" class="w-full pl-11 pr-4 py-3 bg-white border border-slate-200 rounded-2xl outline-none focus:ring-2 focus:ring-emerald-500 text-sm font-medium" placeholder="Quick Search...">
                         </div>
                         
-                        <!-- EQUAL THREE WAY BULK ACTION ROW -->
                         <div class="flex gap-2 mb-6">
                             <button onclick="markAll('P')" class="flex-1 py-3 bg-emerald-50 text-emerald-700 border border-emerald-100 rounded-2xl text-[10px] font-black uppercase tracking-widest active:scale-95 transition-all">All Present</button>
                             <button onclick="markAll('A')" class="flex-1 py-3 bg-red-50 text-red-700 border border-red-100 rounded-2xl text-[10px] font-black uppercase tracking-widest active:scale-95 transition-all">All Absent</button>
@@ -1320,7 +1423,6 @@
                                         </div>
                                     ` : ''}
 
-                                    <!-- Inline Leave Reason Input box if marked 'L' -->
                                     ${state.currentDayAttendance[s.id] === 'L' ? `
                                         <div class="px-2 pb-1">
                                             <input type="text" placeholder="Why leave? (e.g. Fever, Out of city)" oninput="updateLeaveReason('${s.id}', this.value)" value="${state.currentDayReasons[s.id] || ''}" class="w-full text-xs p-2.5 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:ring-1 focus:ring-amber-500 font-semibold text-amber-950">
@@ -1339,11 +1441,10 @@
                 const statsMap = {};
                 state.students.forEach(s => statsMap[s.id] = { roll: s.rollNo, name: s.name, P:0, A:0, L:0, total:0 });
                 
-                // Exclude holidays from the active attendance logs denominator
                 const filteredAtt = state.allAttendance.filter(day => {
                     const isReportMonth = day.date.startsWith(state.selectedReportMonth);
                     const isHoliday = getActiveHoliday(day.date);
-                    return isReportMonth && !isHoliday; // Skip planned off dates!
+                    return isReportMonth && !isHoliday;
                 });
 
                 filteredAtt.forEach(day => {
@@ -1353,7 +1454,6 @@
                 });
                 const reportData = Object.values(statsMap);
 
-                // Compile all daily leave reasons written this month
                 const monthlyReasonsList = [];
                 filteredAtt.forEach(day => {
                     if (day.reasons) {
@@ -1373,7 +1473,6 @@
                     }
                 });
 
-                // --- STREAMING_CHUNK: Compiling reports statistics... ---
                 container.innerHTML = `
                     <div class="p-6 pb-24">
                         <div class="flex items-center justify-between mb-6">
@@ -1408,7 +1507,6 @@
                             </table>
                         </div>
 
-                        <!-- MONTHLY LEAVE REASONS FEED -->
                         <div class="mt-6 bg-white p-5 rounded-[32px] border border-slate-100 shadow-xl">
                             <h3 class="text-xs font-black text-slate-800 uppercase tracking-widest mb-4 flex items-center gap-2">
                                 <i data-lucide="book-open" class="w-4 h-4 text-amber-500"></i> Month's Leave Explanations
@@ -1432,6 +1530,7 @@
                     </div>
                 `;
             } else if (state.view === 'backup') {
+                const teacher = state.currentTeacher;
                 container.innerHTML = `
                     <div class="p-6">
                         <div class="flex items-center gap-4 mb-10">
@@ -1441,7 +1540,7 @@
                         <div class="bg-white p-12 rounded-[52px] border-2 border-emerald-50 shadow-2xl text-center space-y-8">
                             <div class="w-24 h-24 bg-emerald-600 text-white rounded-[36px] flex items-center justify-center mx-auto shadow-emerald-200 shadow-2xl"><i data-lucide="database-backup" class="w-12 h-12"></i></div>
                             <div>
-                                <h3 class="text-2xl font-black text-slate-900 mb-2 leading-tight">Master Backup</h3>
+                                <h3 class="text-2xl font-black text-slate-900 mb-2 leading-tight">${teacher ? teacher.name : "Teacher"} - Backup</h3>
                                 <p class="text-sm text-slate-500 font-medium px-4 leading-relaxed tracking-tight">Keep an offline record of every student and every attendance day in your private storage.</p>
                             </div>
                             <button onclick="downloadBackup()" class="w-full bg-emerald-600 text-white py-5 rounded-3xl font-black shadow-lg shadow-emerald-100 active:scale-95 transition-all tracking-widest uppercase text-xs">Download Full JSON Archive</button>
